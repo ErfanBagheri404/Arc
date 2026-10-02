@@ -95,6 +95,15 @@ impl IslandState {
         let c = self.radius.step(dt);
         a || b || c
     }
+
+    /// Advance springs by real elapsed time. Used by the frame loop so a dropped
+    /// frame shortens the animation instead of slowing it down.
+    pub fn step_dt(&mut self, dt: f32) -> bool {
+        let a = self.width.step(dt);
+        let b = self.height.step(dt);
+        let c = self.radius.step(dt);
+        a || b || c
+    }
 }
 
 #[cfg(test)]
