@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# local config + state (never commit user data)
+/config.toml
+*.log
+arc.db
+arc.db-*
+
+# planning docs live on disk only
+*.md
+!README.md
