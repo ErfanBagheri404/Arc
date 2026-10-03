@@ -40,6 +40,20 @@ pub fn run() -> std::process::ExitCode {
     let mut state = IslandState::collapsed();
     overlay.show();
 
+    // First paint before the loop: with no events yet, the dirty-frame loop would
+    // park on frame zero and show an undefined (never-presented) window until the
+    // first hotkey or click.
+    overlay.resize(state.logical_width(), state.logical_height());
+    renderer.resize(
+        overlay.dpi().snap(state.logical_width()),
+        overlay.dpi().snap(state.logical_height()),
+    );
+    let frame = ui::build(&ui::ViewState::new(
+        state.logical_width(),
+        state.logical_height(),
+    ));
+    renderer.present(&frame, overlay.dpi().scale, 0.0);
+
     let mut last = Instant::now();
     loop {
         let mut redraw = false;

@@ -43,6 +43,9 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT",
     "Win32_System_Ole",
 ] }
+# D2D1's geometry sink takes points as windows_numerics::Vector2, and the
+# `windows` crate does not re-export that type, so it must be a direct dep.
+windows-numerics = "0.3"
 log = "0.4"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
