@@ -129,13 +129,13 @@ pub fn build(state: &ViewState) -> Frame {
     let mut scene = Scene::new();
 
     // 1. The body. Always emitted, always the whole frame, always pure black and
-    //    opaque. This is the whole look. The radius is clamped to what the rect can
-    //    actually render, per the reference's `min(r, min(w, h) / 2)`.
-    //    Bottom corners only: the island is flush with the top edge of the screen,
-    //    so its top corners are square (see `CornerRadii::bottom_only`).
+    //    opaque. This is the whole look. All four corners carry the same radius
+    //    (iOS style): the reference pill reads as a rounded rect, not a capsule
+    //    and not a square-topped tab. The radius is clamped to what the rect can
+    //    actually render.
     scene.push(Node::RoundRect {
         rect: frame,
-        radii: CornerRadii::bottom_only(radius).clamped(fw, fh),
+        radii: CornerRadii::uniform(radius).clamped(fw, fh),
         fill: Rgba::BLACK,
     });
 
@@ -536,34 +536,38 @@ mod tests {
     }
 
     #[test]
-    fn body_is_square_at_the_top_and_rounded_only_at_the_bottom() {
-        // The island is flush against the top edge of the display: rounding its
-        // top corners would cut two notches out of the screen edge. Measured on
-        // the reference, the silhouette holds full width for the first ~70% of
-        // the height and tapers only over the last few rows.
+    fn body_corners_are_uniform_ios_style() {
+        // The reference pill carries the same continuous-corner radius on all
+        // four corners: measured on the reference, the top rows taper inward
+        // exactly like the bottom rows. Not a capsule (r = h/2), not a
+        // square-topped tab.
         let Node::RoundRect { radii, .. } = &collapsed().scene.nodes[0] else {
             panic!()
         };
-        assert_eq!(*radii, CornerRadii::bottom_only(PILL_RADIUS_REF));
-        assert_eq!(radii.top_left, 0.0, "top-left must be square");
-        assert_eq!(radii.top_right, 0.0, "top-right must be square");
+        assert_eq!(*radii, CornerRadii::uniform(PILL_RADIUS_REF));
+        assert_eq!(radii.top_left, PILL_RADIUS_REF, "top-left must be rounded");
+        assert_eq!(
+            radii.top_right, PILL_RADIUS_REF,
+            "top-right must be rounded"
+        );
         assert_eq!(radii.bottom_left, PILL_RADIUS_REF);
         assert_eq!(radii.bottom_right, PILL_RADIUS_REF);
         assert_eq!(PILL_RADIUS_REF, 10.0);
     }
 
     #[test]
-    fn expanded_body_also_keeps_its_top_corners_square() {
-        // The panel grows downward, so its top edge stays flush with the screen
-        // for the whole morph: the square top is not a collapsed-only detail.
+    fn expanded_body_keeps_its_corners_rounded_too() {
+        // The panel morph carries the same uniform rounding: no corner ever
+        // goes square at any point of the morph.
         for open in [0.0f32, 0.5, 1.0] {
             let f = build(&ViewState::new(width_at(open), height_at(open)));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
-            assert_eq!(radii.top_left, 0.0, "top corner rounded at {open}");
-            assert_eq!(radii.top_right, 0.0, "top corner rounded at {open}");
-            assert!(radii.bottom_left > 0.0 && radii.bottom_right > 0.0);
+            assert_eq!(radii.top_left, radii.bottom_left, "at {open}");
+            assert_eq!(radii.top_right, radii.bottom_right, "at {open}");
+            assert!(radii.top_left > 0.0, "top-left rounded at {open}");
+            assert!(radii.bottom_right > 0.0);
         }
     }
 
@@ -808,9 +812,10 @@ mod tests {
     }
 
     #[test]
-    fn radius_lerps_10_to_24_across_the_morph_on_the_bottom_corners_only() {
-        // The top corners stay square for the whole morph (flush with the screen
-        // edge), so only the bottom pair tracks openness.
+    fn radius_lerps_10_to_24_across_the_morph() {
+        // All four corners carry the same radius (iOS style) and track
+        // openness together: the corners hold the same value as each other at
+        // every point of the morph.
         let mut prev = -1.0;
         for i in 0..=100 {
             let open = i as f32 / 100.0;
@@ -829,8 +834,11 @@ mod tests {
                 "at {open}: {:?}",
                 radii
             );
-            assert_eq!(radii.top_left, 0.0, "top-left rounded at {open}");
-            assert_eq!(radii.top_right, 0.0, "top-right rounded at {open}");
+            assert_eq!(radii.top_left, radii.bottom_left, "corners split at {open}");
+            assert_eq!(
+                radii.top_right, radii.bottom_right,
+                "corners split at {open}"
+            );
             assert!(radii.bottom_left >= prev, "radius dipped at {open}");
             prev = radii.bottom_left;
         }
