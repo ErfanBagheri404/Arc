@@ -17,7 +17,10 @@ use crate::ui;
 /// display changes smoothness, not the motion curve.
 const NOMINAL_FRAME: Duration = Duration::from_micros(16_667);
 /// When fully idle, yield this long between message-queue polls instead of spinning.
-const IDLE_POLL: Duration = Duration::from_millis(16);
+/// Also the hover-polling cadence: a collapsed island is click-through, so the
+/// pointer has to be sampled rather than awaited. 25 ms is under one frame at
+/// 40 Hz and still leaves the process ~0% CPU.
+const IDLE_POLL: Duration = Duration::from_millis(25);
 
 /// Entry point.
 pub fn run() -> std::process::ExitCode {
@@ -72,6 +75,10 @@ pub fn run() -> std::process::ExitCode {
 
         let now = Instant::now();
         let dt = now.duration_since(last).min(Duration::from_millis(100));
+        // Hover is polled, not event-driven (the collapsed window is
+        // click-through), so it has to be stepped even on frames where nothing
+        // else woke us up.
+        let hover_changed = state.hover_step(overlay.pointer_over(), dt.as_secs_f32());
         let animating = state.step_dt(dt.as_secs_f32());
 
         // A hidden island is not just un-drawn: it is removed from the screen so
@@ -82,7 +89,7 @@ pub fn run() -> std::process::ExitCode {
             overlay.show();
         }
 
-        if animating || redraw {
+        if animating || hover_changed || redraw {
             last = now;
 
             overlay.resize(state.logical_width(), state.logical_height());

@@ -34,11 +34,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_A,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible, PeekMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
-    HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+    GetForegroundWindow, GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible,
+    PeekMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE,
+    GWL_STYLE, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
     WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
@@ -666,6 +666,32 @@ impl Overlay {
         self.pump_messages();
         self.poll_fullscreen();
         std::mem::take(&mut self.state.events)
+    }
+
+    /// Is the cursor inside the window rect right now? Polled, not message-
+    /// driven: while collapsed the window is `WS_EX_TRANSPARENT`, so it never
+    /// receives `WM_MOUSEMOVE` and hover-dwell has nothing to listen to.
+    pub fn pointer_over(&self) -> bool {
+        let mut p = POINT::default();
+        // SAFETY: `p` is a valid POINT for the call's duration.
+        if unsafe { GetCursorPos(&mut p) }.is_err() {
+            return false;
+        }
+        let Some(rect) = self.client_rect_physical() else {
+            return false;
+        };
+        p.x >= rect.left && p.x < rect.right && p.y >= rect.top && p.y < rect.bottom
+    }
+
+    /// Window rect in physical screen pixels (not DPI-virtualized).
+    fn client_rect_physical(&self) -> Option<RECT> {
+        let mut r = RECT::default();
+        // SAFETY: `r` is a valid RECT for the call's duration; a false return
+        // just means no rect, which the caller treats as "not over".
+        if unsafe { GetWindowRect(self.hwnd, &mut r) }.is_err() {
+            return None;
+        }
+        Some(r)
     }
 
     fn pump_messages(&mut self) {

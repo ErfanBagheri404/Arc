@@ -155,6 +155,22 @@ impl CornerRadii {
             bottom_left: self.bottom_left.clamp(0.0, m),
         }
     }
+
+    /// Rounded at the bottom only; square at the top.
+    ///
+    /// The island is flush against the top edge of the display, so its top
+    /// corners are never seen as corners — measured on the reference, the
+    /// silhouette runs at full width for the first ~70% of the height and
+    /// tapers only over the last few rows. Rounding the top would cut two
+    /// visible notches out of the top edge.
+    pub const fn bottom_only(r: f32) -> Self {
+        Self {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_right: r,
+            bottom_left: r,
+        }
+    }
 }
 
 /// Squircle (continuous corner) coefficient. 1.0 = circular arcs, ~0.55 ≈ Apple's
