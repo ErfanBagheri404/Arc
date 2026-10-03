@@ -72,8 +72,12 @@ pub const PILL_GLYPH_RADIUS: f32 = 3.0;
 pub const FOOTER_CLOCK: &str = "00:00";
 
 /// Expanded panel height, mirrored from `app::state::PANEL_H`.
+// Test-only mirror of the reference heights (the parity suite asserts the
+// app state against them); layout owns the real ones.
+#[cfg(test)]
 pub const PANEL_H_REF: f32 = layout::PANEL_H_REF;
 /// Collapsed pill height, mirrored from `app::state::PILL_H`.
+#[cfg(test)]
 pub const PILL_H_REF: f32 = layout::PILL_H_REF;
 
 /// The pill glyph's resting grey — dim enough to read as an indicator, not text.
@@ -926,7 +930,7 @@ mod tests {
         let mut panel = IslandState::collapsed();
         panel.toggle();
         for _ in 0..400 {
-            panel.step();
+            panel.step_dt(1.0 / 60.0);
         }
         assert_eq!(panel.logical_width(), PANEL_W_REF, "PANEL_W drifted");
         assert_eq!(panel.logical_height(), PANEL_H_REF, "PANEL_H drifted");

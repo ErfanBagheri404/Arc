@@ -15,7 +15,7 @@
 //! - The process opts into `PER_MONITOR_AWARE_V2` **before** any window exists
 //!   (docs/05 §2), so mixed-DPI desktops place the island on the right monitor.
 
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -170,16 +170,13 @@ struct State {
 ///
 /// `Yes` is the right initial state: the island starts collapsed and must not
 /// eat clicks. `No` is used while the panel is open so it can be interacted with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClickThrough {
+    /// Clicks pass through to whatever is underneath (the collapsed island).
+    #[default]
     Yes,
+    /// The island takes input (the open panel).
     No,
-}
-
-impl Default for ClickThrough {
-    fn default() -> Self {
-        ClickThrough::Yes
-    }
 }
 
 impl Default for State {
@@ -363,7 +360,9 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_LBUTTONUP => {
-            ReleaseCapture();
+            // No state to recover: if the capture was already gone, the click
+            // below is still delivered to us.
+            let _ = unsafe { ReleaseCapture() };
             let (x, y) = lparam_xy(lparam);
             push_event(
                 hwnd,
@@ -464,17 +463,6 @@ unsafe extern "system" fn wnd_proc(
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
-    }
-}
-
-/// Turns the expression above into an `LRESULT`, keeping the match arms terse.
-trait IntoLResult {
-    fn into(self) -> LRESULT;
-}
-
-impl IntoLResult for () {
-    fn into(self) -> LRESULT {
-        LRESULT(0)
     }
 }
 
@@ -767,18 +755,20 @@ impl Overlay {
         // SW_SHOWNOACTIVATE, never SW_SHOW: showing must not steal focus.
         // SAFETY: our own HWND.
         unsafe {
-            ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
     }
 
     pub fn hide(&self) {
         // SAFETY: our own HWND.
         unsafe {
-            ShowWindow(self.hwnd, SW_HIDE);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
 
     /// Logical size last requested through [`Overlay::resize`].
+    /// Last logical size the app asked for — feeds the Phase-2 debug overlay.
+    #[allow(dead_code)]
     pub fn logical_size(&self) -> (f32, f32) {
         self.logical_size
     }
@@ -790,6 +780,8 @@ impl Overlay {
     }
 
     /// Whether a fullscreen app currently owns our monitor.
+    /// Current fullscreen-suppression state — feeds the Phase-2 debug overlay.
+    #[allow(dead_code)]
     pub fn is_fullscreen(&self) -> bool {
         self.fullscreen
     }
@@ -805,8 +797,8 @@ impl Drop for Overlay {
         // flight cannot observe freed memory.
         // SAFETY: our own HWND.
         unsafe {
-            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
-            DestroyWindow(self.hwnd);
+            let _ = SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+            let _ = DestroyWindow(self.hwnd);
         }
     }
 }

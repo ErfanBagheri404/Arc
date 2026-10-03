@@ -56,6 +56,9 @@ impl Rgba {
         Self { r, g, b, a: 1.0 }
     }
 
+    // Named for the CSS-style rgba() it mirrors; `Rgba::from_rgba` would read
+    // as `from_…` without taking a tuple. Naming kept for call-site clarity.
+    #[allow(clippy::self_named_constructors)]
     pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
@@ -168,6 +171,7 @@ pub struct PathSegment {
 
 /// Build the outline of `rect` with continuous (squircle) corners as cubic Béziers.
 /// Four segments, clockwise from the top-left corner.
+#[allow(clippy::vec_init_then_push)]
 pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let r = radii.clamped(rect.w, rect.h);
     let (x, y) = (rect.x, rect.y);
@@ -175,8 +179,12 @@ pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let k = SQUIRCLE_K;
 
     // Circle approximation constant scaled by the squircle factor.
-    let c = 0.552_284_749_83 * k;
+    // Cubic-circle kappa (0.55228474983…) rounded to what f32 can actually hold.
+    let c = 0.552_284_8 * k;
 
+    // Four pushes with an exact matching capacity, each with its own comment
+    // about which edge of the squircle it builds — clearer than an array of
+    // four expression tails.
     let mut segs = Vec::with_capacity(4);
 
     // Top-left: (x + r.tl, y) → (x, y + r.tl)

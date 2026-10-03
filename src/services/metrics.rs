@@ -5,6 +5,9 @@
 //! readers. CPU temperature is deliberately absent — Windows has no public API for it
 //! (see docs/07-RISKS.md T8).
 
+// Phase 4 consumes this surface (the media/metrics engine). It is written ahead
+// of its consumers, like `core/`, so the unused surface is allowed per-module.
+#[allow(dead_code)]
 /// Snapshot the UI consumes. Fields are `None` when the counter is unavailable on
 /// this machine (VMs and some drivers lack them) — never fail the tab over it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -21,6 +24,7 @@ pub struct History {
     capacity: usize,
 }
 
+#[allow(dead_code)]
 impl History {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -50,6 +54,7 @@ impl History {
 }
 
 /// Current capability probe. Phase 1: everything unavailable.
+#[allow(dead_code)]
 pub fn probe() -> Metrics {
     Metrics::default()
 }

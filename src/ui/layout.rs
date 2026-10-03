@@ -31,6 +31,9 @@ pub const CONTENT_FADE_IN_START: f32 = 0.15;
 pub const PILL_GLYPH_FADE_OUT_END: f32 = 0.5;
 
 /// Slack allowed by the bounds invariant, absorbing float error in the lerps.
+/// Allowed slop when asserting emitted rects stay inside the frame.
+/// Test-only: production code clamps hard in [`fit`].
+#[cfg(test)]
 pub const BOUNDS_EPSILON: f32 = 0.5;
 
 /// How open the island is, `0.0` at the collapsed pill and `1.0` at the panel.

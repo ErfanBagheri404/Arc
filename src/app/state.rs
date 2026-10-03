@@ -26,6 +26,8 @@ pub enum WindowMode {
 /// Island geometry + morph springs.
 pub struct IslandState {
     mode: WindowMode,
+    /// What to restore to when a fullscreen app goes away.
+    mode_before_hide: WindowMode,
     width: Spring,
     height: Spring,
     radius: Spring,
@@ -35,12 +37,16 @@ impl IslandState {
     pub fn collapsed() -> Self {
         Self {
             mode: WindowMode::Collapsed,
+            mode_before_hide: WindowMode::Collapsed,
             width: Spring::new(PILL_W, SpringConfig::OPEN),
             height: Spring::new(PILL_H, SpringConfig::OPEN),
             radius: Spring::new(PILL_RADIUS, SpringConfig::GENERIC),
         }
     }
 
+    /// Queried by the UI parity tests and later by the debug overlay (Phase 2);
+    /// the run loop drives `hidden()`/`expanded()` instead.
+    #[allow(dead_code)]
     pub fn mode(&self) -> WindowMode {
         self.mode
     }
@@ -57,10 +63,17 @@ impl IslandState {
             WindowMode::Expanded => WindowMode::Collapsed,
             _ => WindowMode::Expanded,
         };
-        let (w, h, r) = if self.expanded() {
-            (PANEL_W, PANEL_H, PANEL_RADIUS)
-        } else {
-            (PILL_W, PILL_H, PILL_RADIUS)
+        self.retarget();
+    }
+
+    /// Point the springs at the current mode's geometry. Springs are retargeted,
+    /// never snapped, so every mode change is a morph.
+    fn retarget(&mut self) {
+        let (w, h, r) = match self.mode {
+            WindowMode::Expanded => (PANEL_W, PANEL_H, PANEL_RADIUS),
+            // `Hidden` keeps the pill's target: the window is hidden while the
+            // springs settle, so when it comes back there is no jump.
+            WindowMode::Collapsed | WindowMode::Hidden => (PILL_W, PILL_H, PILL_RADIUS),
         };
         self.width.set_config(SpringConfig::OPEN);
         self.height.set_config(SpringConfig::OPEN);
@@ -70,8 +83,28 @@ impl IslandState {
         self.radius.set_target(r);
     }
 
+    /// Hide for a fullscreen app, remembering what to come back to.
+    ///
+    /// Restoring to `Expanded` unconditionally would pop the panel open in the
+    /// user's face after every fullscreen video, so the pre-hide mode is kept.
     pub fn hide(&mut self) {
+        if self.mode != WindowMode::Hidden {
+            self.mode_before_hide = self.mode;
+        }
         self.mode = WindowMode::Hidden;
+    }
+
+    /// Undo [`hide`](Self::hide). No-op unless currently hidden.
+    pub fn restore(&mut self) {
+        if self.mode == WindowMode::Hidden {
+            self.mode = self.mode_before_hide;
+            self.retarget();
+        }
+    }
+
+    /// True while suppressed for a fullscreen app.
+    pub fn hidden(&self) -> bool {
+        self.mode == WindowMode::Hidden
     }
 
     pub fn logical_width(&self) -> f32 {
@@ -82,18 +115,11 @@ impl IslandState {
         self.height.value()
     }
 
+    /// The radius spring's live value. The UI derives radius from `openness`,
+    /// so this exists for parity assertions and the debug overlay.
+    #[allow(dead_code)]
     pub fn logical_radius(&self) -> f32 {
         self.radius.value()
-    }
-
-    /// Advance springs one frame. Returns true when another frame is needed.
-    pub fn step(&mut self) -> bool {
-        // 60 Hz nominal; the frame loop paces to the display refresh.
-        let dt = 1.0 / 60.0;
-        let a = self.width.step(dt);
-        let b = self.height.step(dt);
-        let c = self.radius.step(dt);
-        a || b || c
     }
 
     /// Advance springs by real elapsed time. Used by the frame loop so a dropped
@@ -132,7 +158,7 @@ mod tests {
     fn toggle_retargets_springs_not_snaps() {
         let mut s = IslandState::collapsed();
         s.toggle();
-        assert!(s.step(), "expansion must animate");
+        assert!(s.step_dt(1.0 / 60.0), "expansion must animate");
         assert!(s.logical_width() > PILL_W && s.logical_width() < PANEL_W);
     }
 
@@ -141,12 +167,51 @@ mod tests {
         let mut s = IslandState::collapsed();
         s.toggle();
         for _ in 0..200 {
-            s.step();
+            s.step_dt(1.0 / 60.0);
         }
         assert_eq!(s.logical_width(), PANEL_W);
         assert_eq!(s.logical_height(), PANEL_H);
         assert_eq!(s.logical_radius(), PANEL_RADIUS);
-        assert!(!s.step(), "settled springs must request no more frames");
+        assert!(
+            !s.step_dt(1.0 / 60.0),
+            "settled springs must request no more frames"
+        );
+    }
+
+    #[test]
+    fn restore_returns_to_the_mode_we_left() {
+        let mut s = IslandState::collapsed();
+        s.toggle();
+        assert!(s.expanded());
+        s.hide();
+        assert!(s.hidden());
+        s.restore();
+        assert!(s.expanded(), "must not silently collapse the user's panel");
+    }
+
+    #[test]
+    fn restore_from_collapsed_stays_collapsed() {
+        let mut s = IslandState::collapsed();
+        s.hide();
+        s.restore();
+        assert_eq!(s.mode(), WindowMode::Collapsed);
+    }
+
+    #[test]
+    fn hide_is_idempotent_and_does_not_clobber_the_remembered_mode() {
+        let mut s = IslandState::collapsed();
+        s.toggle();
+        s.hide();
+        s.hide();
+        s.restore();
+        assert!(s.expanded());
+    }
+
+    #[test]
+    fn restore_is_a_noop_when_not_hidden() {
+        let mut s = IslandState::collapsed();
+        s.restore();
+        assert_eq!(s.mode(), WindowMode::Collapsed);
     }
 
     #[test]

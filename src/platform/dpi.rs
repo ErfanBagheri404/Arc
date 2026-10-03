@@ -18,7 +18,10 @@ impl Default for Dpi {
 
 impl Dpi {
     /// Physical (device) pixels → logical pixels.
-    pub fn to_logical(&self, physical: f32) -> f32 {
+    // `Dpi` is a Copy of a single f32; `self` by value.
+    /// Feeds the Phase-2 click/pointer mapping (physical → logical).
+    #[allow(dead_code)]
+    pub fn to_logical(self, physical: f32) -> f32 {
         if self.scale <= 0.0 {
             physical
         } else {
@@ -27,7 +30,7 @@ impl Dpi {
     }
 
     /// Logical pixels → physical pixels.
-    pub fn to_physical(&self, logical: f32) -> f32 {
+    pub fn to_physical(self, logical: f32) -> f32 {
         logical * self.scale
     }
 

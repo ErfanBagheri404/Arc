@@ -6,11 +6,10 @@
 
 mod state;
 
-pub use state::{IslandState, WindowMode};
+pub use state::IslandState;
 
 use std::time::{Duration, Instant};
 
-use crate::core::anim::{Spring, SpringConfig};
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
 use crate::ui;
 
@@ -31,6 +30,13 @@ pub fn run() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
 
+    if !overlay.hotkey_ok() {
+        // Never fatal: the island still works, the user just cannot toggle it
+        // from a hotkey (another app owns Ctrl+Shift+A, or a locked-down session
+        // refused registration).
+        log::warn!("global hotkey Ctrl+Shift+A was not registered; toggle unavailable");
+    }
+
     let mut state = IslandState::collapsed();
     overlay.show();
 
@@ -41,7 +47,9 @@ pub fn run() -> std::process::ExitCode {
             match event {
                 Event::ToggleIsland => state.toggle(),
                 Event::FullscreenEnter => state.hide(),
-                Event::FullscreenExit => state.toggle(),
+                // Back to whatever we were showing before the fullscreen app —
+                // not unconditionally the panel.
+                Event::FullscreenExit => state.restore(),
                 Event::Resized { .. } | Event::Redraw => redraw = true,
                 Event::Quit => return std::process::ExitCode::SUCCESS,
                 _ => redraw = true,
@@ -51,6 +59,15 @@ pub fn run() -> std::process::ExitCode {
         let now = Instant::now();
         let dt = now.duration_since(last).min(Duration::from_millis(100));
         let animating = state.step_dt(dt.as_secs_f32());
+
+        // A hidden island is not just un-drawn: it is removed from the screen so
+        // it cannot sit over the fullscreen app it is hiding for.
+        if state.hidden() {
+            overlay.hide();
+        } else {
+            overlay.show();
+        }
+
         if animating || redraw {
             last = now;
 
@@ -83,13 +100,4 @@ pub fn run() -> std::process::ExitCode {
             }
         }
     }
-}
-
-/// Springs for the island morph, re-exported so tests can assert parity with the
-/// reference design's open/close parameters.
-pub fn island_springs() -> (Spring, Spring) {
-    (
-        Spring::new(185.0, SpringConfig::OPEN),
-        Spring::new(32.0, SpringConfig::OPEN),
-    )
 }
