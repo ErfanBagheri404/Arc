@@ -12,7 +12,7 @@ pub const PILL_W_REF: f32 = 185.0;
 /// Expanded panel width, mirrored from `app::state::PANEL_W`.
 pub const PANEL_W_REF: f32 = 640.0;
 /// Collapsed pill corner radius, mirrored from `app::state::PILL_RADIUS`.
-pub const PILL_RADIUS_REF: f32 = 16.0;
+pub const PILL_RADIUS_REF: f32 = 10.0;
 /// Expanded panel corner radius, mirrored from `app::state::PANEL_RADIUS`.
 pub const PANEL_RADIUS_REF: f32 = 24.0;
 
@@ -66,7 +66,10 @@ fn openness_axis(value: f32, from: f32, to: f32) -> f32 {
     ((value - from) / span).clamp(0.0, 1.0)
 }
 
-/// Corner radius for a given openness: 16 at rest, 24 when open, lerped between.
+/// Corner radius for a given openness: 10 at rest, 24 when open, lerped between.
+///
+/// 10, not `h / 2`: the reference end has a straight vertical edge, not a
+/// semicircle.
 ///
 /// The reference clamps the radius to `min(r, min(w, h) / 2)`; the renderer does
 /// that too, but doing it here keeps the emitted rects self-consistent in tests.
@@ -180,10 +183,10 @@ mod tests {
     }
 
     #[test]
-    fn radius_lerps_16_to_24() {
-        assert!((island_radius(0.0) - 16.0).abs() < 1e-6);
+    fn radius_lerps_10_to_24() {
+        assert!((island_radius(0.0) - 10.0).abs() < 1e-6);
         assert!((island_radius(1.0) - 24.0).abs() < 1e-6);
-        assert!((island_radius(0.5) - 20.0).abs() < 1e-6);
+        assert!((island_radius(0.5) - 17.0).abs() < 1e-6);
         // Monotonic across the whole range.
         let mut prev = -1.0;
         for i in 0..=100 {

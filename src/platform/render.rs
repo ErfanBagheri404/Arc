@@ -181,6 +181,7 @@ macro_rules! step {
 fn acquire_target(
     d2d: &ID2D1Factory,
     swapchain: &IDXGISwapChain1,
+    scale: f32,
 ) -> windows::core::Result<ID2D1RenderTarget> {
     let surface: IDXGISurface = step!("GetBuffer", unsafe { swapchain.GetBuffer(0) });
     let props = D2D1_RENDER_TARGET_PROPERTIES {
@@ -189,8 +190,11 @@ fn acquire_target(
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
             alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
         },
-        dpiX: 96.0,
-        dpiY: 96.0,
+        // The scene is authored in DIPs, the back buffer is physical pixels.
+        // Reporting the real DPI is what makes 185 DIPs land on 231 px, so the
+        // island is centred and sharp instead of top-left pinned and undersized.
+        dpiX: 96.0 * scale,
+        dpiY: 96.0 * scale,
         usage: D2D1_RENDER_TARGET_USAGE_NONE,
         minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
     };
@@ -375,7 +379,7 @@ impl Renderer {
     }
 
     /// Draw one frame and present it.
-    pub fn present(&mut self, frame: &Frame, _scale: f32, dt: f32) {
+    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32) {
         self.probe.presents = self.probe.presents.saturating_add(1);
         self.probe.last_node_count = frame.scene.count();
         let ms = dt.max(0.0) * 1000.0;
@@ -393,7 +397,7 @@ impl Renderer {
         else {
             return;
         };
-        let target = match acquire_target(&d2d, &swapchain) {
+        let target = match acquire_target(&d2d, &swapchain, scale) {
             Ok(pair) => pair,
             Err(error) => {
                 log::error!("arc: could not bind a render target to the back buffer ({error})");

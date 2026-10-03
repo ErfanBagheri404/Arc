@@ -539,7 +539,7 @@ mod tests {
             panic!()
         };
         assert_eq!(*radii, CornerRadii::uniform(PILL_RADIUS_REF));
-        assert_eq!(PILL_RADIUS_REF, 16.0);
+        assert_eq!(PILL_RADIUS_REF, 10.0);
     }
 
     // ----------------------------------------------------------------- panel
