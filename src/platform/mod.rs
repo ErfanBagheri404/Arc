@@ -11,6 +11,9 @@ pub mod dpi;
 pub mod render;
 pub mod window;
 
+// Re-exports consumed by `app`; see the note on the core barrel about
+// `allow(unused_imports)`.
+#[allow(unused_imports)]
 pub use dpi::Dpi;
 pub use render::Renderer;
 pub use window::{ClickThrough, Overlay};
