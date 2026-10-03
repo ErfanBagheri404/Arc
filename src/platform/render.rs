@@ -124,6 +124,82 @@ fn corner_start(rect: &Rect, radii: CornerRadii, index: usize) -> (f32, f32) {
     }
 }
 
+/// One operation of a squircle outline, as data. `fill_squircle` replays this
+/// against a Direct2D geometry sink; keeping it as a value lets a test pin the
+/// path's shape (one continuous figure) without a GPU.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OutlineStep {
+    Begin((f32, f32)),
+    Line((f32, f32)),
+    Bezier((f32, f32), (f32, f32), (f32, f32)),
+    End,
+}
+
+/// Walk the four corner curves as ONE figure: open at the first corner, join each
+/// curve to the next with a straight edge, close along the last edge.
+///
+/// Emitting a figure per corner instead fills four leaf-shaped slivers, which is
+/// how the island once rendered as nothing at all.
+fn outline_steps(rect: &Rect, radii: CornerRadii) -> Vec<OutlineStep> {
+    let mut steps = Vec::with_capacity(6);
+    steps.push(OutlineStep::Begin(corner_start(rect, radii, 0)));
+    for (index, seg) in squircle_segments(rect, radii.clamped(rect.w, rect.h))
+        .iter()
+        .enumerate()
+    {
+        if index > 0 {
+            steps.push(OutlineStep::Line(corner_start(rect, radii, index)));
+        }
+        steps.push(OutlineStep::Bezier(seg.c1, seg.c2, seg.to));
+    }
+    steps.push(OutlineStep::End);
+    steps
+}
+
+/// Names the failing chain step in the log. A silent `Err` here means an invisible
+/// island with no clue why, which is the one failure mode that cannot be debugged
+/// from the outside.
+macro_rules! step {
+    ($what:literal, $expr:expr) => {
+        match $expr {
+            Ok(value) => value,
+            Err(error) => {
+                log::error!("arc: GPU step {} failed: {error}", $what);
+                return Err(error);
+            }
+        }
+    };
+}
+
+/// Bind a Direct2D render target to the swapchain's current back buffer.
+///
+/// Flip-model swapchains require every reference to a back buffer to be released
+/// before `Present`, or the buffers cannot rotate: `Present` still returns `S_OK`
+/// and the composition silently never updates. Holding one render target for the
+/// life of the window is therefore a no-op bug, so the target is acquired before
+/// drawing and dropped before presenting.
+fn acquire_target(
+    d2d: &ID2D1Factory,
+    swapchain: &IDXGISwapChain1,
+) -> windows::core::Result<ID2D1RenderTarget> {
+    let surface: IDXGISurface = step!("GetBuffer", unsafe { swapchain.GetBuffer(0) });
+    let props = D2D1_RENDER_TARGET_PROPERTIES {
+        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        usage: D2D1_RENDER_TARGET_USAGE_NONE,
+        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+    };
+    let target = step!("CreateDxgiSurfaceRenderTarget", unsafe {
+        d2d.CreateDxgiSurfaceRenderTarget(&surface, &props)
+    });
+    Ok(target)
+}
+
 /// Replays a scene onto the overlay's swapchain.
 pub struct Renderer {
     hwnd: HWND,
@@ -134,13 +210,8 @@ pub struct Renderer {
     dcomp_target: Option<IDCompositionTarget>,
     visual: Option<IDCompositionVisual>,
     d2d_factory: Option<ID2D1Factory>,
-    target: Option<ID2D1RenderTarget>,
-    black: Option<ID2D1SolidColorBrush>,
     dwrite: Option<IDWriteFactory>,
     formats: HashMap<FormatKey, IDWriteTextFormat>,
-    /// Decoded image slots. Phase 2 fills this from the WIC decoder; a handle that
-    /// is absent renders as a placeholder so the layout can be judged now.
-    images: HashMap<u64, ()>,
     probe: PerfProbe,
     /// True when the GPU chain could not be built (RDP, no GPU, CI). Everything
     /// except drawing still works, so the app runs and tests pass anywhere.
@@ -163,11 +234,8 @@ impl Renderer {
             dcomp_target: None,
             visual: None,
             d2d_factory: None,
-            target: None,
-            black: None,
             dwrite: None,
             formats: HashMap::new(),
-            images: HashMap::new(),
             probe: PerfProbe::default(),
             degraded: true,
             dead: false,
@@ -195,8 +263,6 @@ impl Renderer {
     /// Drop every GPU object. Reused by `Drop`, so it must tolerate being called
     /// on a half-built renderer.
     fn release_chain(&mut self) {
-        self.target = None;
-        self.black = None;
         self.swapchain = None;
         self.visual = None;
         self.dcomp_target = None;
@@ -241,9 +307,9 @@ impl Renderer {
             }
         }
         let device = device.ok_or(Error::from_thread())?;
-        let dxgi: IDXGIDevice = device.cast()?;
-        let adapter = unsafe { dxgi.GetAdapter()? };
-        let factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
+        let dxgi: IDXGIDevice = step!("IDXGIDevice", device.cast());
+        let adapter = step!("GetAdapter", unsafe { dxgi.GetAdapter() });
+        let factory: IDXGIFactory2 = step!("IDXGIFactory2", unsafe { adapter.GetParent() });
 
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: self.width,
@@ -261,16 +327,22 @@ impl Renderer {
             AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
             Flags: 0,
         };
-        let swapchain = unsafe { factory.CreateSwapChainForComposition(&device, &desc, None)? };
+        let swapchain = step!("CreateSwapChainForComposition", unsafe {
+            factory.CreateSwapChainForComposition(&device, &desc, None)
+        });
         // Explicit sRGB rather than the driver's default (risks T3).
         if let Ok(swapchain3) = swapchain.cast::<IDXGISwapChain3>() {
             let _ = unsafe { swapchain3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) };
             let _ = unsafe { swapchain3.SetMaximumFrameLatency(1) };
         }
 
-        let dcomp: IDCompositionDevice = unsafe { DCompositionCreateDevice(&dxgi)? };
-        let dcomp_target = unsafe { dcomp.CreateTargetForHwnd(self.hwnd, true)? };
-        let visual = unsafe { dcomp.CreateVisual()? };
+        let dcomp: IDCompositionDevice = step!("DCompositionCreateDevice", unsafe {
+            DCompositionCreateDevice(&dxgi)
+        });
+        let dcomp_target = step!("CreateTargetForHwnd", unsafe {
+            dcomp.CreateTargetForHwnd(self.hwnd, true)
+        });
+        let visual = step!("CreateVisual", unsafe { dcomp.CreateVisual() });
         unsafe {
             visual.SetContent(&swapchain)?;
             dcomp_target.SetRoot(Some(&visual))?;
@@ -279,32 +351,15 @@ impl Renderer {
 
         let d2d: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-        let surface: IDXGISurface = unsafe { swapchain.GetBuffer(0)? };
-        let props = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
-        let target = unsafe { d2d.CreateDxgiSurfaceRenderTarget(&surface, &props)? };
-        let black = unsafe {
-            let color = premultiply(Rgba::BLACK);
-            target.CreateSolidColorBrush(&color, None)?
-        };
-        let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let dwrite: IDWriteFactory = step!("DWriteCreateFactory", unsafe {
+            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+        });
 
         self.swapchain = Some(swapchain);
         self.dcomp = Some(dcomp);
         self.dcomp_target = Some(dcomp_target);
         self.visual = Some(visual);
         self.d2d_factory = Some(d2d);
-        self.target = Some(target);
-        self.black = Some(black);
         self.dwrite = Some(dwrite);
         Ok(())
     }
@@ -329,13 +384,22 @@ impl Renderer {
             None => ms,
         });
 
-        // Degraded or device-lost: count the frame and bail. The window keeps
-        // working, which is what stops a GPU hiccup from taking down the app.
         if self.degraded || self.dead {
             return;
         }
-        let Some(target) = self.target.clone() else {
+        // Drop the previous frame's render target *before* touching the swapchain:
+        // a flip-model back buffer cannot rotate while a reference is alive.
+        let (Some(swapchain), Some(d2d)) = (self.swapchain.clone(), self.d2d_factory.clone())
+        else {
             return;
+        };
+        let target = match acquire_target(&d2d, &swapchain) {
+            Ok(pair) => pair,
+            Err(error) => {
+                log::error!("arc: could not bind a render target to the back buffer ({error})");
+                self.degraded = true;
+                return;
+            }
         };
 
         unsafe { target.BeginDraw() };
@@ -351,7 +415,10 @@ impl Renderer {
             target.Clear(Some(&transparent));
         }
         frame.scene.walk(&mut |node| self.draw_node(&target, node));
-        if let Err(error) = unsafe { target.EndDraw(None, None) } {
+        let drawn = unsafe { target.EndDraw(None, None) };
+        // Release the back buffer before presenting; see `acquire_target`.
+        drop(target);
+        if let Err(error) = drawn {
             let code = error.code();
             log::error!("arc: draw failed ({error})");
             if code == DXGI_ERROR_DEVICE_REMOVED || code == DXGI_ERROR_DEVICE_RESET {
@@ -359,14 +426,16 @@ impl Renderer {
             }
             return;
         }
-        if let Some(swapchain) = &self.swapchain {
-            // Sync interval 1: the loop already parks when idle, so a queued
-            // frame should not be dropped on the floor before it is seen.
-            let result = unsafe { swapchain.Present(1, Default::default()) };
-            if result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET {
-                log::error!("arc: device lost while presenting");
-                self.dead = true;
-            }
+
+        // Sync interval 1: the loop already parks when idle, so a queued frame
+        // should not be dropped on the floor before it is seen.
+        let result = unsafe { swapchain.Present(1, Default::default()) };
+        if !result.is_ok() {
+            log::warn!("arc: Present failed: {result:?} (0x{:08X})", result.0);
+        }
+        if result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET {
+            log::error!("arc: device lost while presenting");
+            self.dead = true;
         }
     }
 
@@ -381,9 +450,9 @@ impl Renderer {
                 handle,
                 radii,
             } => {
-                // Phase 2 wires WIC decoding into `images`; until then every handle
-                // renders as a placeholder so the layout is still reviewable.
-                self.images.entry(handle.0).or_insert(());
+                // Phase 2 wires WIC decoding in; until then every handle renders as a
+                // placeholder so the layout is still reviewable.
+                let _ = handle;
                 self.fill_squircle(target, *rect, *radii, Rgba::rgb(0.16, 0.16, 0.18));
             }
             Node::Bar {
@@ -433,7 +502,6 @@ impl Renderer {
         let Some(factory) = self.d2d_factory.clone() else {
             return;
         };
-        let segments = squircle_segments(&rect, radii.clamped(rect.w, rect.h));
         let Ok(path) = (unsafe { factory.CreatePathGeometry() }) else {
             return;
         };
@@ -442,22 +510,17 @@ impl Renderer {
         };
         unsafe {
             sink.SetFillMode(D2D1_FILL_MODE_WINDING);
-            // The four segments are corner arcs; straight edges between them are
-            // implicit lines from one segment's endpoint to the next corner start.
-            for (index, segment) in segments.iter().enumerate() {
-                if index > 0 {
-                    sink.AddLine(point(corner_start(&rect, radii, index)));
+            for step in outline_steps(&rect, radii) {
+                match step {
+                    OutlineStep::Begin(p) => sink.BeginFigure(point(p), D2D1_FIGURE_BEGIN_FILLED),
+                    OutlineStep::Line(p) => sink.AddLine(point(p)),
+                    OutlineStep::Bezier(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: point(c1),
+                        point2: point(c2),
+                        point3: point(to),
+                    }),
+                    OutlineStep::End => sink.EndFigure(D2D1_FIGURE_END_CLOSED),
                 }
-                sink.BeginFigure(
-                    point(corner_start(&rect, radii, index)),
-                    D2D1_FIGURE_BEGIN_FILLED,
-                );
-                sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                    point1: point(segment.c1),
-                    point2: point(segment.c2),
-                    point3: point(segment.to),
-                });
-                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             }
             if sink.Close().is_err() {
                 return;
@@ -672,5 +735,74 @@ mod tests {
         let long = crate::ui::text::measure("00:00:00", &style);
         assert!(short > 0.0, "a clock must measure wider than nothing");
         assert!(long > short, "more characters must measure wider");
+    }
+
+    #[test]
+    fn outline_is_one_continuous_figure() {
+        let rect = Rect::new(0.0, 0.0, 231.0, 40.0);
+        let steps = outline_steps(&rect, CornerRadii::uniform(12.0));
+
+        assert!(
+            matches!(steps[0], OutlineStep::Begin(_)),
+            "must open a figure"
+        );
+        assert!(
+            matches!(steps[steps.len() - 1], OutlineStep::End),
+            "must close the figure"
+        );
+        let begins = steps
+            .iter()
+            .filter(|s| matches!(s, OutlineStep::Begin(_)))
+            .count();
+        let ends = steps
+            .iter()
+            .filter(|s| matches!(s, OutlineStep::End))
+            .count();
+        assert_eq!((begins, ends), (1, 1), "exactly one figure");
+
+        // Four curves, each joined to the next by a straight edge: the third
+        // operation is a Line only when a curve precedes it.
+        let curves = steps
+            .iter()
+            .filter(|s| matches!(s, OutlineStep::Bezier(..)))
+            .count();
+        let lines = steps
+            .iter()
+            .filter(|s| matches!(s, OutlineStep::Line(_)))
+            .count();
+        assert_eq!(
+            (curves, lines),
+            (4, 3),
+            "4 curves, 3 joins; closure is implicit"
+        );
+
+        // Every curve endpoint must meet the next join or, for the last, the start.
+        let start = match steps[0] {
+            OutlineStep::Begin(p) => p,
+            _ => unreachable!(),
+        };
+        let mut last_to = start;
+        let mut joins = 0;
+        for step in &steps {
+            match step {
+                OutlineStep::Line(p) => {
+                    let at = last_to;
+                    assert!(
+                        (at.0 - p.0).abs() < 0.001 || (at.1 - p.1).abs() < 0.001,
+                        "join must start where the previous curve ended: {at:?} vs {p:?}"
+                    );
+                    joins += 1;
+                    last_to = *p;
+                }
+                OutlineStep::Bezier(_, _, to) => last_to = *to,
+                _ => {}
+            }
+        }
+        // Closure: final endpoint connects back along an edge to the start.
+        assert!(
+            (last_to.0 - start.0).abs() < 0.001 || (last_to.1 - start.1).abs() < 0.001,
+            "closing edge must be axis-aligned: {last_to:?} vs {start:?}"
+        );
+        assert_eq!(joins, 3);
     }
 }

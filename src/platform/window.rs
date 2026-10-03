@@ -35,15 +35,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetWindowLongPtrW, GetWindowRect, IsWindowVisible, PeekMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, HTTRANSPARENT,
-    HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND,
-    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCALCSIZE,
-    WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible, PeekMessageW,
+    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
+    HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
+    SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
+    WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_CAPTION,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::dpi::Dpi;
@@ -266,6 +266,19 @@ fn covers_monitor(fg: &RECT, monitor: &RECT) -> bool {
         && h >= monitor.bottom - monitor.top - SLOP
         && fg.left <= monitor.left + SLOP
         && fg.top <= monitor.top + SLOP
+}
+
+/// True when a window's style means it has given up its title bar — the
+/// discriminator between a real fullscreen app and a merely maximized one.
+///
+/// A maximized window keeps `WS_CAPTION` and only grows to the *work* area; a
+/// fullscreen app (game, F11 browser, video player) strips the caption and covers
+/// the whole *monitor*. Rect comparison alone is not enough: on a monitor with no
+/// taskbar reserved — a secondary display, or a primary with the taskbar
+/// auto-hidden — the work area equals the monitor, so every maximized window would
+/// otherwise read as fullscreen and hide the island permanently.
+fn strips_chrome(style: i32) -> bool {
+    style & (WS_CAPTION.0 as i32) == 0
 }
 
 /// Pure: hotkey modifiers for Ctrl+Shift+A. `MOD_NOREPEAT` keeps a held key from
@@ -728,7 +741,9 @@ impl Overlay {
                         // Fullscreen somewhere else on the desktop: irrelevant.
                         false
                     } else {
-                        covers_monitor(&fg_rect, &mi.rcMonitor)
+                        // Both conditions: monitor-sized *and* chrome stripped.
+                        let style = GetWindowLongW(fg, GWL_STYLE);
+                        covers_monitor(&fg_rect, &mi.rcMonitor) && strips_chrome(style)
                     }
                 }
             }
@@ -899,6 +914,32 @@ mod tests {
         let mon = r(0, 0, 1920, 1080);
         // Monitor-sized but floating below the origin: not covering it.
         assert!(!covers_monitor(&r(0, 40, 1920, 1120), &mon));
+    }
+
+    #[test]
+    fn chrome_detection_separates_fullscreen_from_maximized() {
+        // A maximized window keeps WS_CAPTION ...
+        assert!(!strips_chrome(WS_CAPTION.0 as i32));
+        assert!(!strips_chrome((WS_CAPTION.0 | 0x0004_0000) as i32));
+        // ... a fullscreen one has dropped it (borderless popup).
+        assert!(strips_chrome(WS_POPUP.0 as i32));
+        assert!(strips_chrome(0x8000_0000u32 as i32));
+    }
+
+    #[test]
+    fn monitor_sized_maximized_window_is_not_fullscreen() {
+        // The regression: no taskbar reserved, so work area == monitor rect and a
+        // maximized window covers it exactly. Rect alone said "fullscreen"; the
+        // caption check must veto it.
+        let mon = r(0, 0, 1920, 1080);
+        let maximized = r(0, 0, 1920, 1080);
+        assert!(covers_monitor(&maximized, &mon));
+        assert!(
+            !(covers_monitor(&maximized, &mon) && strips_chrome(WS_CAPTION.0 as i32)),
+            "a captioned window must not hide the island"
+        );
+        // A genuinely fullscreen window still passes both.
+        assert!(covers_monitor(&maximized, &mon) && strips_chrome(WS_POPUP.0 as i32));
     }
 
     #[test]
