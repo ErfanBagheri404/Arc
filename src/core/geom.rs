@@ -67,11 +67,6 @@ impl Rgba {
     pub const TRANSPARENT: Self = Self::rgba(0.0, 0.0, 0.0, 0.0);
     pub const WHITE: Self = Self::rgb(1.0, 1.0, 1.0);
 
-    /// The reference design's hover micro-fill: 2% at rest, 24% on hover.
-    pub fn black_hover(is_hover: bool) -> Self {
-        Self::rgba(0.0, 0.0, 0.0, if is_hover { 0.24 } else { 0.02 })
-    }
-
     /// Clamp channels to 0..=1.
     pub fn clamped(self) -> Self {
         let c = |v: f32| v.clamp(0.0, 1.0);
@@ -318,11 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn luminance_and_hover_fill() {
+    fn luminance_bounds() {
         assert!(Rgba::WHITE.luminance() > 0.9);
         assert!(Rgba::BLACK.luminance().abs() < 1e-6);
-        assert!((Rgba::black_hover(false).a - 0.02).abs() < 1e-6);
-        assert!((Rgba::black_hover(true).a - 0.24).abs() < 1e-6);
     }
 
     #[test]

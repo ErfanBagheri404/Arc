@@ -96,7 +96,9 @@ fn clamp_progress(value: f32) -> f32 {
 }
 
 fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().collect()
+    // PCWSTR and friends are null-terminated; without the NUL the callee reads
+    // past the end and every CreateTextFormat / DrawText gets garbage.
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn format_key(style: &TextStyle) -> FormatKey {
@@ -553,7 +555,9 @@ impl Renderer {
             right: rect.max_x(),
             bottom: rect.max_y(),
         };
-        let utf16 = wide(text);
+        // DrawText takes a slice, so it gets the length the text actually has --
+        // the NUL that wide() appends for PCWSTR is not part of it.
+        let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
             target.DrawText(
                 &utf16,
@@ -563,7 +567,7 @@ impl Renderer {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             )
-        }
+        };
     }
 
     fn text_format(&mut self, style: &TextStyle) -> Option<IDWriteTextFormat> {
@@ -572,19 +576,46 @@ impl Renderer {
             return Some(cached.clone());
         }
         let factory = self.dwrite.as_ref()?;
-        let family = wide("Segoe UI Variable Display");
-        let format = unsafe {
-            factory
-                .CreateTextFormat(
+        // "Segoe UI Variable Display" is absent on some Win10/11 SKUs, and a
+        // missing family fails the whole CreateTextFormat call -- so walk down
+        // to plain Segoe UI instead of rendering nothing.
+        // DirectWrite rejects a null locale name with E_INVALIDARG, so the
+        // locale has to be a real, empty-terminated string even when we want the
+        // user default.
+        let locale = wide("");
+        let mut last_err = None;
+        let mut format = None;
+        for family_name in ["Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI"] {
+            let family = wide(family_name);
+            match unsafe {
+                factory.CreateTextFormat(
                     PCWSTR(family.as_ptr()),
                     None,
                     windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT(key.weight),
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
                     style.size.max(1.0),
-                    PCWSTR::null(),
+                    PCWSTR(locale.as_ptr()),
                 )
-                .ok()?
+            } {
+                Ok(f) => {
+                    format = Some(f);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let format = match format {
+            Some(f) => f,
+            None => {
+                // One warn per frame would flood; the format is never going to
+                // appear mid-run, so report once and stay quiet.
+                if !self.warned {
+                    self.warned = true;
+                    log::warn!("arc: CreateTextFormat failed: {last_err:?}");
+                }
+                return None;
+            }
         };
         unsafe {
             let _ = format.SetTextAlignment(match style.align {
@@ -594,6 +625,12 @@ impl Renderer {
             });
             // Vertically centred: the UI hands out boxes, not baselines.
             let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            // Tab labels must never wrap mid-word: the UI measures with an
+            // approximation while DirectWrite advances the real glyphs, so the
+            // layout box can come out a hair too narrow (see "Clipboard").
+            let _ = format.SetWordWrapping(
+                windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
+            );
         }
         self.formats.insert(key, format.clone());
         Some(format)

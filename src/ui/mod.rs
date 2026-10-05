@@ -30,16 +30,8 @@ pub use text::{line_height, measure};
 /// The island's brand name, shown in the panel header.
 pub const APP_TITLE: &str = "Arc";
 
-/// Placeholder tab strip. Real tab content lands in a later phase; this exists so
-/// the shell's proportions can be judged against the reference before anything is
-/// wired up to services. Each entry is `(glyph name, visible label)`.
-pub const TABS: [(&str, &str); 5] = [
-    ("media", "Media"),
-    ("stats", "Stats"),
-    ("timer", "Timer"),
-    ("clipboard", "Clipboard"),
-    ("usage", "Usage"),
-];
+/// Visible tab labels, in layout order.
+pub const TABS: [&str; 5] = ["Media", "Stats", "Timer", "Clipboard", "Usage"];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
 pub const CONTENT_ROWS: usize = 3;
@@ -56,6 +48,8 @@ pub const HEADER_GAP: f32 = 6.0;
 pub const TAB_H: f32 = 20.0;
 /// Horizontal padding inside a tab, so its box is a superset of its label.
 pub const TAB_PAD: f32 = 10.0;
+/// Corner radius of the hovered/active tab's background pill.
+pub const TAB_RADIUS: f32 = 8.0;
 /// Height of one content row.
 pub const ROW_H: f32 = 24.0;
 /// Gap between content rows.
@@ -103,20 +97,61 @@ const TAB_LABEL: TextStyle = TextStyle {
     align: Align::Center,
 };
 
-/// Everything the UI needs to build a frame. Grows per phase.
+/// Tab strip and content state. Grows per phase.
 #[derive(Debug, Clone, Default)]
 pub struct ViewState {
     pub island_width: f32,
     pub island_height: f32,
+    /// Index into [`TABS`] of the selected tab.
+    pub active_tab: usize,
+    /// Index into [`TABS`] under the cursor, if any.
+    pub hover_tab: Option<usize>,
 }
 
 impl ViewState {
-    pub fn new(island_width: f32, island_height: f32) -> Self {
-        Self {
-            island_width,
-            island_height,
-        }
+    /// Click at panel-space `(x, y)` selects the tab under it.
+    ///
+    /// Panel space, not screen space: the island is a top-anchored window, so the
+    /// window hands over client coordinates and this resolves them against the
+    /// same layout the frame was built from. Returns the new selection, or `None`
+    /// when the click landed outside every tab (which must not clear the
+    /// selection).
+    pub fn click_tab(&mut self, x: f32, y: f32) -> Option<usize> {
+        self.active_tab = self.tab_at(x, y)?;
+        Some(self.active_tab)
     }
+
+    /// Which tab contains panel-space `(x, y)`, if any.
+    pub fn tab_at(&self, x: f32, y: f32) -> Option<usize> {
+        if openness(self.island_width, self.island_height) <= layout::CONTENT_FADE_IN_START {
+            // The strip is not on screen yet, so nothing under the cursor is a
+            // tab. Same threshold as content emission: a tab the user cannot see
+            // cannot be clicked.
+            return None;
+        }
+        let top = HEADER_Y + header_height() + HEADER_GAP;
+        if !(top..top + TAB_H).contains(&y) {
+            return None;
+        }
+        tab_boxes(self.island_width)
+            .into_iter()
+            .position(|(left, w)| w > 0.0 && x >= left && x <= left + w)
+    }
+}
+
+/// Each tab's `(left, width)` in panel space, padding included, in layout order.
+///
+/// Single source of truth for the strip: drawing and hit-testing both read it, so
+/// a click can never land on a different tab than the one that was drawn.
+fn tab_boxes(fw: f32) -> Vec<(f32, f32)> {
+    let natural: Vec<f32> = TABS
+        .iter()
+        .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0)
+        .collect();
+    layout::row_items(&natural, TAB_GAP, fw - PANEL_PAD * 2.0)
+        .into_iter()
+        .map(|(x, w)| (PANEL_PAD + x, w))
+        .collect()
 }
 
 /// Build one frame. Pure: same input, same output.
@@ -168,7 +203,7 @@ pub fn build(state: &ViewState) -> Frame {
     if content_opacity > 0.0 {
         let mut group = Node::Group {
             rect: frame,
-            children: panel_content(fw, fh),
+            children: panel_content(fw, fh, state),
         };
         if let Node::Group { children, .. } = &mut group {
             children
@@ -195,9 +230,9 @@ fn put(fw: f32, fh: f32, rect: Rect) -> Rect {
 }
 
 /// The expanded panel's contents, in draw order: header, tabs, rows, footer.
-fn panel_content(fw: f32, fh: f32) -> Vec<Node> {
+fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
     let mut out = header_block(fw, fh);
-    let tabs = tab_strip(fw, fh, header_height());
+    let tabs = tab_strip(fw, fh, header_height(), state);
     let tab_bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
     out.extend(tabs);
     out.extend(content_rows(fw, fh, tab_bottom));
@@ -236,37 +271,51 @@ fn header_block(fw: f32, fh: f32) -> Vec<Node> {
 /// Labels are measured with the pure approximator (`text::measure`) and then given
 /// symmetric padding, so each tab's box is a superset of its label run. The `Glyph`
 /// node carries the icon name, the `Text` node the visible label.
-fn tab_strip(fw: f32, fh: f32, header_h: f32) -> Vec<Node> {
-    let widths: Vec<f32> = TABS
-        .iter()
-        .map(|(_, label)| measure(label, &TAB_LABEL) + TAB_PAD * 2.0)
-        .collect();
-    let items = layout::row_items(&widths, TAB_GAP, fw - PANEL_PAD * 2.0);
+///
+/// The selected tab gets the stronger micro-fill; the
+/// hovered one gets it at 24 % of that. The two states are additive rather than
+/// exclusive, so hovering the selected tab deepens it instead of doing nothing.
+fn tab_strip(fw: f32, fh: f32, header_h: f32, state: &ViewState) -> Vec<Node> {
     let y = HEADER_Y + header_h + HEADER_GAP;
+    let mut out = Vec::with_capacity(TABS.len() * 3);
 
-    let mut out = Vec::with_capacity(TABS.len() * 2);
-    for ((name, label), (x, w)) in TABS.iter().zip(items) {
+    for (i, (label, (left, w))) in TABS.iter().zip(tab_boxes(fw)).enumerate() {
         if w <= 0.0 {
             continue;
         }
-        out.push(Node::Glyph {
-            rect: put(fw, fh, Rect::new(PANEL_PAD + x, y, w, TAB_H)),
-            name,
-            color: TAB_LABEL.color,
-        });
+        let selected = i == state.active_tab;
+        let hovered = state.hover_tab == Some(i);
+        if selected || hovered {
+            // The reference's micro-fill reads as a *lift* out of pure black, so
+            // it has to be light-on-dark: a black-alpha fill over the opaque
+            // black body composites to exactly the body colour and is invisible.
+            out.push(Node::RoundRect {
+                rect: put(fw, fh, Rect::new(left, y, w, TAB_H)),
+                radii: CornerRadii::uniform(TAB_RADIUS),
+                fill: Rgba::rgba(1.0, 1.0, 1.0, if selected { 0.16 } else { 0.06 }),
+            });
+        }
+        let color = if selected {
+            Rgba::WHITE
+        } else {
+            TAB_LABEL.color
+        };
         out.push(Node::Text {
             rect: put(
                 fw,
                 fh,
                 Rect::new(
-                    PANEL_PAD + x + TAB_PAD,
+                    left + TAB_PAD,
                     y,
                     w - TAB_PAD * 2.0,
                     line_height(&TAB_LABEL),
                 ),
             ),
             text: label.to_string(),
-            style: TAB_LABEL.clone(),
+            style: TextStyle {
+                color,
+                ..TAB_LABEL.clone()
+            },
         });
     }
     out
@@ -296,7 +345,7 @@ fn content_rows(fw: f32, fh: f32, top: f32) -> Vec<Node> {
             Node::RoundRect {
                 rect: put(fw, fh, Rect::new(PANEL_PAD, y, inner_w, h)),
                 radii: CornerRadii::uniform(ROW_RADIUS * scale),
-                fill: Rgba::black_hover(false),
+                fill: Rgba::rgba(1.0, 1.0, 1.0, 0.04),
             }
         })
         .collect()
@@ -336,6 +385,16 @@ mod tests {
     use super::layout::{PANEL_RADIUS_REF, PANEL_W_REF, PILL_RADIUS_REF, PILL_W_REF};
     use super::*;
 
+    /// Test helper: a view at an explicit size. Production sizes the persistent
+    /// `ViewState` in place; tests build throwaway ones.
+    fn view_sized(island_width: f32, island_height: f32) -> ViewState {
+        ViewState {
+            island_width,
+            island_height,
+            ..Default::default()
+        }
+    }
+
     /// Same slack the bounds invariant allows, shared with `layout::fit`.
     const EPS: f32 = layout::BOUNDS_EPSILON;
 
@@ -355,11 +414,170 @@ mod tests {
     }
 
     fn collapsed() -> Frame {
-        build(&ViewState::new(PILL_W_REF, PILL_H_REF))
+        build(&view_sized(PILL_W_REF, PILL_H_REF))
     }
 
     fn panel() -> Frame {
-        build(&ViewState::new(PANEL_W_REF, PANEL_H_REF))
+        build(&view_sized(PANEL_W_REF, PANEL_H_REF))
+    }
+
+    #[test]
+    fn tab_click_centers_select_their_tab() {
+        // `tab_boxes` is the single source of truth for drawing and hit-testing,
+        // so feeding each box's own center back in must round-trip, and a miss
+        // must keep the old selection instead of clearing it.
+        let top = HEADER_Y + header_height() + HEADER_GAP;
+        let y = top + TAB_H / 2.0;
+        let boxes = tab_boxes(PANEL_W_REF);
+        assert!(boxes.len() >= 2, "need multiple tabs to test selection");
+        for (i, (left, w)) in boxes.iter().enumerate() {
+            let mut v = ViewState {
+                island_width: PANEL_W_REF,
+                island_height: PANEL_H_REF,
+                active_tab: 0,
+                hover_tab: None,
+            };
+            assert_eq!(
+                v.click_tab(left + w / 2.0, y),
+                Some(i),
+                "center of tab {i} should select it"
+            );
+            assert_eq!(v.active_tab, i);
+        }
+        let mut v = view(2, None);
+        assert_eq!(v.click_tab(4.0, 4.0), None, "corner miss selects nothing");
+        assert_eq!(v.active_tab, 2, "miss must not clear the selection");
+    }
+
+    /// A view at full panel size with an explicit selection.
+    fn view(active_tab: usize, hover_tab: Option<usize>) -> ViewState {
+        ViewState {
+            island_width: PANEL_W_REF,
+            island_height: PANEL_H_REF,
+            active_tab,
+            hover_tab,
+        }
+    }
+
+    // ------------------------------------------------------------ tab strip
+
+    #[test]
+    fn tab_hit_testing_matches_the_drawn_strip() {
+        let v = view(0, None);
+        for (i, (left, w)) in tab_boxes(PANEL_W_REF).into_iter().enumerate() {
+            let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
+            assert_eq!(v.tab_at(left + w / 2.0, y), Some(i), "centre of tab {i}");
+            assert_eq!(v.tab_at(left + 0.5, y), Some(i), "left edge of tab {i}");
+            assert_eq!(
+                v.tab_at(left + w - 0.5, y),
+                Some(i),
+                "right edge of tab {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_hit_testing_rejects_the_gaps_and_the_margins() {
+        let v = view(0, None);
+        let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
+        let boxes = tab_boxes(PANEL_W_REF);
+        let (first_left, _) = boxes[0];
+        // Left margin, before the first tab.
+        assert_eq!(v.tab_at(first_left - 1.0, y), None);
+        // The 8 px gap between the first and second tab.
+        let (l0, w0) = boxes[0];
+        let (l1, _) = boxes[1];
+        assert_eq!(v.tab_at(l0 + w0 + 1.0, y), None);
+        assert!(l1 - (l0 + w0) >= TAB_GAP - 1e-3);
+        // Above and below the strip band.
+        assert_eq!(v.tab_at(first_left + 2.0, y - TAB_H), None);
+        assert_eq!(v.tab_at(first_left + 2.0, y + TAB_H), None);
+    }
+
+    #[test]
+    fn collapsed_island_has_no_clickable_tabs() {
+        let mut v = view(0, None);
+        v.island_width = PILL_W_REF;
+        v.island_height = PILL_H_REF;
+        let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
+        assert_eq!(v.tab_at(PILL_W_REF / 2.0, y), None);
+        assert_eq!(v.click_tab(PILL_W_REF / 2.0, y), None);
+    }
+
+    #[test]
+    fn click_selects_the_tab_under_the_cursor_and_leaves_others_alone() {
+        let mut v = view(0, None);
+        let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
+        let boxes = tab_boxes(PANEL_W_REF);
+        let (l, w) = boxes[3];
+        assert_eq!(v.click_tab(l + w / 2.0, y), Some(3));
+        assert_eq!(v.active_tab, 3);
+        // A click outside every tab must not clear the selection.
+        assert_eq!(v.click_tab(1.0, 1.0), None);
+        assert_eq!(v.active_tab, 3);
+    }
+
+    #[test]
+    fn selected_tab_draws_a_micro_fill_pill_behind_its_label() {
+        let f = build(&view(2, None));
+        let pill = all_nodes(&f)
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::RoundRect { rect, fill, radii } => Some((rect, fill, radii)),
+                _ => None,
+            })
+            .find(|(r, _, _)| (r.h - TAB_H).abs() < 1e-3)
+            .expect("selected tab must draw a pill");
+        assert_eq!(pill.1, Rgba::rgba(1.0, 1.0, 1.0, 0.16));
+        assert!((pill.2.top_left - TAB_RADIUS).abs() < 1e-4);
+        let (l, w) = tab_boxes(PANEL_W_REF)[2];
+        assert!((pill.0.x - l).abs() < 1e-3 && (pill.0.w - w).abs() < 1e-3);
+    }
+
+    #[test]
+    fn unselected_and_unhovered_tabs_draw_no_pill() {
+        let f = build(&view(0, None));
+        let pills = all_nodes(&f)
+            .into_iter()
+            .filter(|n| matches!(n, Node::RoundRect { rect, .. } if (rect.h - TAB_H).abs() < 1e-3))
+            .count();
+        assert_eq!(pills, 1, "only the selected tab has a pill");
+    }
+
+    #[test]
+    fn hovered_tab_draws_a_fainter_pill_than_the_selected_one() {
+        let f = build(&view(0, Some(1)));
+        let fills: Vec<Rgba> = all_nodes(&f)
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::RoundRect { rect, fill, .. } if (rect.h - TAB_H).abs() < 1e-3 => Some(fill),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 2, "selected + hovered");
+        assert!(fills.contains(&Rgba::rgba(1.0, 1.0, 1.0, 0.16)), "selected");
+        assert!(fills.contains(&Rgba::rgba(1.0, 1.0, 1.0, 0.06)), "hovered");
+    }
+
+    #[test]
+    fn selected_tab_label_is_white_the_rest_dim() {
+        let f = build(&view(1, None));
+        for (label, style) in texts(&f)
+            .into_iter()
+            .filter_map(|(t, _, s)| TABS.iter().any(|l| *l == t).then_some((t, s)))
+        {
+            let want_white = label == TABS[1];
+            assert_eq!(style.color == Rgba::WHITE, want_white, "tab {label}");
+        }
+    }
+
+    #[test]
+    fn every_tab_label_is_still_drawn_once() {
+        let f = build(&view(0, None));
+        for label in TABS {
+            let n = texts(&f).into_iter().filter(|(t, _, _)| t == label).count();
+            assert_eq!(n, 1, "tab {label} drawn exactly once");
+        }
     }
 
     /// Every node in the frame, cloned so callers can hold them past the borrow.
@@ -387,22 +605,31 @@ mod tests {
     }
 
     fn glyph_rects(f: &Frame) -> Vec<Rect> {
-        all_nodes(f)
-            .into_iter()
-            .filter_map(|n| match n {
-                Node::Glyph { rect, .. } => Some(rect),
-                _ => None,
-            })
-            .collect()
+        // Tab boxes are the measured label rects (inset by TAB_PAD) widened back
+        // to the full pill rect, in x order.
+        let mut rects: Vec<Rect> = TABS
+            .iter()
+            .filter_map(|label| find_text(f, label).map(|(r, _)| r))
+            .collect();
+        rects.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        rects.iter_mut().for_each(|r| {
+            r.x -= TAB_PAD;
+            r.w += TAB_PAD * 2.0;
+        });
+        rects
     }
 
-    /// The content rows: every rounded rect narrower than the full frame width
-    /// (the body is always exactly the frame).
+    /// The content rows: the rounded rects that span the panel's inner width.
+    ///
+    /// Selected by width rather than "narrower than the frame" because the tab
+    /// strip now also emits rounded rects (the selection/hover pill), and those
+    /// must not be mistaken for content rows.
     fn row_rects(f: &Frame) -> Vec<Rect> {
+        let inner = f.size.0 - PANEL_PAD * 2.0;
         all_nodes(f)
             .into_iter()
             .filter_map(|n| match n {
-                Node::RoundRect { rect, .. } if rect.w < f.size.0 => Some(rect),
+                Node::RoundRect { rect, .. } if (rect.w - inner).abs() < 1e-3 => Some(rect),
                 _ => None,
             })
             .collect()
@@ -431,7 +658,7 @@ mod tests {
     #[test]
     fn build_is_pure_and_repeatable() {
         for open in [0.0f32, 0.13, 0.5, 0.87, 1.0] {
-            let s = ViewState::new(width_at(open), height_at(open));
+            let s = view_sized(width_at(open), height_at(open));
             assert_eq!(
                 build(&s),
                 build(&s),
@@ -454,7 +681,7 @@ mod tests {
     fn body_is_opaque_pure_black_filling_the_frame() {
         for open in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
             let (w, h) = (width_at(open), height_at(open));
-            let f = build(&ViewState::new(w, h));
+            let f = build(&view_sized(w, h));
             let Node::RoundRect { rect, fill, .. } = &f.scene.nodes[0] else {
                 panic!("first node must be the body at {open}")
             };
@@ -469,7 +696,7 @@ mod tests {
         // The depth cue is black-vs-wallpaper. An Image node behind the panel would
         // mean a texture or acrylic backdrop.
         for open in [0.0f32, 0.5, 1.0] {
-            let f = build(&ViewState::new(width_at(open), height_at(open)));
+            let f = build(&view_sized(width_at(open), height_at(open)));
             assert!(
                 !all_nodes(&f)
                     .iter()
@@ -560,7 +787,7 @@ mod tests {
         // The panel morph carries the same uniform rounding: no corner ever
         // goes square at any point of the morph.
         for open in [0.0f32, 0.5, 1.0] {
-            let f = build(&ViewState::new(width_at(open), height_at(open)));
+            let f = build(&view_sized(width_at(open), height_at(open)));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
@@ -634,7 +861,7 @@ mod tests {
     #[test]
     fn tab_labels_are_measured_not_guessed() {
         let f = panel();
-        for (_, label) in TABS {
+        for label in TABS {
             let (rect, _) =
                 find_text(&f, label).unwrap_or_else(|| panic!("missing tab label {label}"));
             let want = measure(label, &TAB_LABEL);
@@ -664,14 +891,17 @@ mod tests {
     }
 
     #[test]
-    fn content_rows_use_the_reference_2pct_micro_fill_and_r8() {
+    fn content_rows_use_the_reference_4pct_micro_fill_and_r8() {
         let f = panel();
         let rows = row_rects(&f);
         assert_eq!(rows.len(), CONTENT_ROWS);
+        let inner = PANEL_W_REF - PANEL_PAD * 2.0;
         for n in all_nodes(&f) {
             if let Node::RoundRect { rect, radii, fill } = n {
-                if rect.w < PANEL_W_REF {
-                    assert_eq!(fill, Rgba::black_hover(false), "2 % black: {rect:?}");
+                // Content rows only: the tab pill is also a rounded rect and
+                // carries the selection fill instead.
+                if (rect.w - inner).abs() < 1e-3 {
+                    assert_eq!(fill, Rgba::rgba(1.0, 1.0, 1.0, 0.04), "4 % white: {rect:?}");
                     assert!(
                         (radii.top_left - ROW_RADIUS).abs() < 1e-4,
                         "reference row radius is 8: {rect:?}"
@@ -720,7 +950,7 @@ mod tests {
         let f0 = collapsed();
         assert_eq!(f0.scene.count(), 2, "openness 0.0 is body + glyph only");
 
-        let f5 = build(&ViewState::new(width_at(0.5), height_at(0.5)));
+        let f5 = build(&view_sized(width_at(0.5), height_at(0.5)));
         assert!(
             f5.scene.count() > 2,
             "openness 0.5 has content: {:#?}",
@@ -738,7 +968,7 @@ mod tests {
     #[test]
     fn content_is_skipped_below_the_fade_in_threshold() {
         let at = layout::CONTENT_FADE_IN_START - 0.01;
-        let f = build(&ViewState::new(width_at(at), PANEL_H_REF));
+        let f = build(&view_sized(width_at(at), PANEL_H_REF));
         assert_eq!(
             f.scene.count(),
             2,
@@ -749,7 +979,7 @@ mod tests {
 
     #[test]
     fn content_fades_in_above_the_threshold_instead_of_popping() {
-        let f = build(&ViewState::new(width_at(0.35), PANEL_H_REF));
+        let f = build(&view_sized(width_at(0.35), PANEL_H_REF));
         assert!(
             f.scene.count() > 2,
             "content must be emitted at openness 0.35"
@@ -767,7 +997,7 @@ mod tests {
         let mut prev = -1.0;
         for i in 0..=200 {
             let open = i as f32 / 200.0;
-            let f = build(&ViewState::new(width_at(open), height_at(open)));
+            let f = build(&view_sized(width_at(open), height_at(open)));
             let Some((_, style)) = find_text(&f, APP_TITLE) else {
                 continue;
             };
@@ -784,7 +1014,7 @@ mod tests {
     fn pill_glyph_dissolves_before_the_content_arrives() {
         // Just below the content threshold: glyph fading, no content yet.
         let at = layout::CONTENT_FADE_IN_START - 0.02;
-        let f = build(&ViewState::new(width_at(at), PANEL_H_REF));
+        let f = build(&view_sized(width_at(at), PANEL_H_REF));
         assert_eq!(f.scene.count(), 2, "content must not be emitted yet");
         let Node::RoundRect { fill, .. } = &f.scene.nodes[1] else {
             panic!("glyph must be the second node")
@@ -795,7 +1025,7 @@ mod tests {
 
     #[test]
     fn pill_glyph_is_fully_gone_at_half_open() {
-        let f = build(&ViewState::new(width_at(0.5), PANEL_H_REF));
+        let f = build(&view_sized(width_at(0.5), PANEL_H_REF));
         // Once the fade completes the glyph node is dropped entirely rather than
         // emitted at zero alpha: a transparent squircle still costs a tessellation.
         assert!(
@@ -819,7 +1049,7 @@ mod tests {
         let mut prev = -1.0;
         for i in 0..=100 {
             let open = i as f32 / 100.0;
-            let f = build(&ViewState::new(width_at(open), PANEL_H_REF));
+            let f = build(&view_sized(width_at(open), PANEL_H_REF));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
@@ -848,7 +1078,7 @@ mod tests {
     #[test]
     fn body_radius_is_clamped_to_what_the_frame_can_render() {
         // A very short island cannot render a 24 px radius.
-        let f = build(&ViewState::new(640.0, 8.0));
+        let f = build(&view_sized(640.0, 8.0));
         let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
             panic!()
         };
@@ -863,7 +1093,7 @@ mod tests {
             let open = i as f32 / 100.0;
             for h in [32.0f32, 60.0, 116.0, 200.0] {
                 let w = width_at(open);
-                assert_in_bounds(&build(&ViewState::new(w, h)), w, h);
+                assert_in_bounds(&build(&view_sized(w, h)), w, h);
             }
         }
     }
@@ -875,7 +1105,7 @@ mod tests {
         for i in 0..=200 {
             let w = 100.0 + (i as f32 / 200.0) * 800.0;
             let h = 8.0 + (i as f32 / 200.0) * 260.0;
-            assert_in_bounds(&build(&ViewState::new(w, h)), w, h);
+            assert_in_bounds(&build(&view_sized(w, h)), w, h);
         }
     }
 
@@ -890,13 +1120,13 @@ mod tests {
             (1.0, 32.0),
             (300.0, 33.0),
         ] {
-            assert_in_bounds(&build(&ViewState::new(w, h)), w, h);
+            assert_in_bounds(&build(&view_sized(w, h)), w, h);
         }
     }
 
     #[test]
     fn negative_sizes_do_not_produce_escaping_rects() {
-        let f = build(&ViewState::new(-50.0, -10.0));
+        let f = build(&view_sized(-50.0, -10.0));
         assert_eq!(f.scene.count(), 1, "no content for a negative frame");
         assert_eq!(f.scene.nodes[0].rect(), Rect::new(0.0, 0.0, -50.0, -10.0));
     }

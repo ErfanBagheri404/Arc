@@ -41,6 +41,9 @@ pub fn run() -> std::process::ExitCode {
     }
 
     let mut state = IslandState::collapsed();
+    // The tab selection and hover persist across frames; everything else the UI
+    // needs is derived from the size springs.
+    let mut view = ui::ViewState::default();
     overlay.show();
 
     // First paint before the loop: with no events yet, the dirty-frame loop would
@@ -51,15 +54,19 @@ pub fn run() -> std::process::ExitCode {
         overlay.dpi().snap(state.logical_width()),
         overlay.dpi().snap(state.logical_height()),
     );
-    let frame = ui::build(&ui::ViewState::new(
-        state.logical_width(),
-        state.logical_height(),
-    ));
+    view.island_width = state.logical_width();
+    view.island_height = state.logical_height();
+    let frame = ui::build(&view);
     renderer.present(&frame, overlay.dpi().scale, 0.0);
 
     let mut last = Instant::now();
     loop {
         let mut redraw = false;
+        let scale = overlay.dpi().scale;
+        // The persistent view must carry the current geometry: this iteration's
+        // clicks are hit-tested against it.
+        view.island_width = state.logical_width();
+        view.island_height = state.logical_height();
         for event in overlay.pump_events() {
             match event {
                 Event::ToggleIsland => state.toggle(),
@@ -67,9 +74,28 @@ pub fn run() -> std::process::ExitCode {
                 // Back to whatever we were showing before the fullscreen app —
                 // not unconditionally the panel.
                 Event::FullscreenExit => state.restore(),
+                // Clicks arrive in physical client pixels; the UI lays out in
+                // logical ones, so scale before hit-testing.
+                Event::LeftClick { x, y } => {
+                    let hit = view.click_tab(x / scale, y / scale);
+                    if hit.is_some() {
+                        redraw = true;
+                    }
+                }
+                Event::CursorMoved { x, y } => {
+                    let hit = view.tab_at(x / scale, y / scale);
+                    if hit != view.hover_tab {
+                        view.hover_tab = hit;
+                        redraw = true;
+                    }
+                }
+                Event::CursorLeft => {
+                    if view.hover_tab.take().is_some() {
+                        redraw = true;
+                    }
+                }
                 Event::Resized { .. } | Event::Redraw => redraw = true,
                 Event::Quit => return std::process::ExitCode::SUCCESS,
-                _ => redraw = true,
             }
         }
 
@@ -102,10 +128,9 @@ pub fn run() -> std::process::ExitCode {
                 overlay.dpi().snap(state.logical_width()),
                 overlay.dpi().snap(state.logical_height()),
             );
-            let frame = ui::build(&ui::ViewState::new(
-                state.logical_width(),
-                state.logical_height(),
-            ));
+            view.island_width = state.logical_width();
+            view.island_height = state.logical_height();
+            let frame = ui::build(&view);
             renderer.present(&frame, overlay.dpi().scale, dt.as_secs_f32());
         } else {
             // Park: no presents, no spring integration. Re-arm the clock so the
