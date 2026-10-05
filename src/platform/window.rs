@@ -43,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
     WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
     WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_CAPTION,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP,
 };
 
 use super::dpi::Dpi;
@@ -278,7 +278,11 @@ fn covers_monitor(fg: &RECT, monitor: &RECT) -> bool {
 /// auto-hidden — the work area equals the monitor, so every maximized window would
 /// otherwise read as fullscreen and hide the island permanently.
 fn strips_chrome(style: i32) -> bool {
-    style & (WS_CAPTION.0 as i32) == 0
+    // Frameless-by-design windows (Electron, Qt, custom-chrome apps) also lack
+    // WS_CAPTION, and when maximized on a taskbar-less work area they would read
+    // as fullscreen permanently. A real fullscreen app (game, F11 video) is
+    // never `WS_MAXIMIZE`d — it positions itself over the monitor.
+    style & (WS_CAPTION.0 as i32) == 0 && style & (WS_MAXIMIZE.0 as i32) == 0
 }
 
 /// Pure: hotkey modifiers for Ctrl+Shift+A. `MOD_NOREPEAT` keeps a held key from
