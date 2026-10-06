@@ -83,14 +83,17 @@ pub fn run() -> std::process::ExitCode {
                     }
                 }
                 Event::CursorMoved { x, y } => {
-                    let hit = view.tab_at(x / scale, y / scale);
-                    if hit != view.hover_tab {
-                        view.hover_tab = hit;
+                    let (lx, ly) = (x / scale, y / scale);
+                    let tab = view.tab_at(lx, ly);
+                    let row = view.row_at(lx, ly);
+                    if tab != view.hover_tab || row != view.hover_row {
+                        view.hover_tab = tab;
+                        view.hover_row = row;
                         redraw = true;
                     }
                 }
                 Event::CursorLeft => {
-                    if view.hover_tab.take().is_some() {
+                    if view.hover_tab.take().is_some() | view.hover_row.take().is_some() {
                         redraw = true;
                     }
                 }

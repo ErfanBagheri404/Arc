@@ -106,6 +106,8 @@ pub struct ViewState {
     pub active_tab: usize,
     /// Index into [`TABS`] under the cursor, if any.
     pub hover_tab: Option<usize>,
+    /// Content row under the cursor, if any.
+    pub hover_row: Option<usize>,
 }
 
 impl ViewState {
@@ -123,10 +125,7 @@ impl ViewState {
 
     /// Which tab contains panel-space `(x, y)`, if any.
     pub fn tab_at(&self, x: f32, y: f32) -> Option<usize> {
-        if openness(self.island_width, self.island_height) <= layout::CONTENT_FADE_IN_START {
-            // The strip is not on screen yet, so nothing under the cursor is a
-            // tab. Same threshold as content emission: a tab the user cannot see
-            // cannot be clicked.
+        if !self.content_visible() {
             return None;
         }
         let top = HEADER_Y + header_height() + HEADER_GAP;
@@ -136,6 +135,24 @@ impl ViewState {
         tab_boxes(self.island_width)
             .into_iter()
             .position(|(left, w)| w > 0.0 && x >= left && x <= left + w)
+    }
+
+    /// Which content row contains panel-space `(x, y)`, if any.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.content_visible() {
+            return None;
+        }
+        row_boxes(self.island_width, self.island_height)
+            .into_iter()
+            .position(|(left, top, w, h)| x >= left && x <= left + w && y >= top && y <= top + h)
+    }
+
+    /// Whether the panel content (tabs, rows, footer) is on screen at all.
+    ///
+    /// Same threshold as content emission: whatever the user cannot see cannot
+    /// be hovered or clicked.
+    fn content_visible(&self) -> bool {
+        openness(self.island_width, self.island_height) > layout::CONTENT_FADE_IN_START
     }
 }
 
@@ -235,7 +252,7 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
     let tabs = tab_strip(fw, fh, header_height(), state);
     let tab_bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
     out.extend(tabs);
-    out.extend(content_rows(fw, fh, tab_bottom));
+    out.extend(content_rows(fw, fh, tab_bottom, state));
     out.extend(footer_block(fw, fh));
     out
 }
@@ -321,9 +338,25 @@ fn tab_strip(fw: f32, fh: f32, header_h: f32, state: &ViewState) -> Vec<Node> {
     out
 }
 
-/// Content area: `CONTENT_ROWS` placeholder rows of the reference's 2 % black
-/// micro-fill, filling the space between the tab strip and the footer.
-fn content_rows(fw: f32, fh: f32, top: f32) -> Vec<Node> {
+/// Content rows: `(left, top, width, height)` in panel space, in layout order.
+///
+/// Single source of truth for the rows, exactly like [`tab_boxes`] for the strip:
+/// drawing and hit-testing both read it, so the row the cursor highlights is the
+/// row the cursor is actually over.
+fn row_boxes(fw: f32, fh: f32) -> Vec<(f32, f32, f32, f32)> {
+    row_rects_below(fw, fh, row_band_top())
+}
+
+/// Panel-space y of the top of the row band: just under the tab strip. Matches
+/// the measured `tab_bottom` [`build`] passes, so hit-testing and drawing agree.
+fn row_band_top() -> f32 {
+    HEADER_Y + header_height() + HEADER_GAP + TAB_H
+}
+
+/// Row geometry below an explicit band top. Split out so [`build`] can pass the
+/// tab strip's *measured* bottom (which the pure band top above approximates)
+/// without duplicating the packing maths.
+fn row_rects_below(fw: f32, fh: f32, top: f32) -> Vec<(f32, f32, f32, f32)> {
     let avail = (fh - FOOTER_BOTTOM_PAD - top).max(0.0);
     let inner_w = fw - PANEL_PAD * 2.0;
     let n = CONTENT_ROWS as f32;
@@ -342,10 +375,26 @@ fn content_rows(fw: f32, fh: f32, top: f32) -> Vec<Node> {
     (0..CONTENT_ROWS)
         .map(|i| {
             let y = y0 + (h + gap) * i as f32;
+            (PANEL_PAD, y, inner_w, h)
+        })
+        .collect()
+}
+
+/// Content area: `CONTENT_ROWS` placeholder rows at the reference's 2 % white
+/// micro-fill, filling the space between the tab strip and the footer.
+///
+/// The row under the cursor lifts to the same 6 % the hovered tab uses, so the
+/// whole shell shares one hover vocabulary.
+fn content_rows(fw: f32, fh: f32, top: f32, state: &ViewState) -> Vec<Node> {
+    row_rects_below(fw, fh, top)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (left, y, w, h))| {
+            let hovered = state.hover_row == Some(i);
             Node::RoundRect {
-                rect: put(fw, fh, Rect::new(PANEL_PAD, y, inner_w, h)),
-                radii: CornerRadii::uniform(ROW_RADIUS * scale),
-                fill: Rgba::rgba(1.0, 1.0, 1.0, 0.04),
+                rect: put(fw, fh, Rect::new(left, y, w, h)),
+                radii: CornerRadii::uniform(ROW_RADIUS),
+                fill: Rgba::rgba(1.0, 1.0, 1.0, if hovered { 0.10 } else { 0.04 }),
             }
         })
         .collect()
@@ -435,7 +484,7 @@ mod tests {
                 island_width: PANEL_W_REF,
                 island_height: PANEL_H_REF,
                 active_tab: 0,
-                hover_tab: None,
+                ..Default::default()
             };
             assert_eq!(
                 v.click_tab(left + w / 2.0, y),
@@ -449,6 +498,29 @@ mod tests {
         assert_eq!(v.active_tab, 2, "miss must not clear the selection");
     }
 
+    #[test]
+    fn row_hover_hits_only_the_row_under_the_cursor() {
+        // Same contract as the tab strip: `row_rects` is the single source of
+        // truth, so each row's own center must hit it and the gaps between rows
+        // must not hit anything.
+        let rects = row_boxes(PANEL_W_REF, PANEL_H_REF);
+        assert!(rects.len() >= 2, "need multiple rows to test hover");
+        let v = view(0, None);
+        for (i, (left, top, w, h)) in rects.iter().enumerate() {
+            assert_eq!(
+                v.row_at(left + w / 2.0, top + h / 2.0),
+                Some(i),
+                "center of row {i} should hit it"
+            );
+        }
+        // Above the first row is the tab strip, not a row.
+        let (_, top0, _, _) = rects[0];
+        assert_eq!(v.row_at(PANEL_W_REF / 2.0, top0 - 4.0), None);
+        // Collapsed island shows no rows, so nothing can be hovered.
+        let shut = view_sized(PILL_W_REF, PILL_H_REF);
+        assert_eq!(shut.row_at(PANEL_W_REF / 2.0, top0 + 4.0), None);
+    }
+
     /// A view at full panel size with an explicit selection.
     fn view(active_tab: usize, hover_tab: Option<usize>) -> ViewState {
         ViewState {
@@ -456,6 +528,7 @@ mod tests {
             island_height: PANEL_H_REF,
             active_tab,
             hover_tab,
+            ..Default::default()
         }
     }
 
