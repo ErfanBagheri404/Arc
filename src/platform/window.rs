@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::dpi::Dpi;
-use super::Event;
+use super::{tray, Event};
 
 /// `WM_MOUSELEAVE` is published in the user32 headers but the generated bindings
 /// only expose it behind `Win32_UI_Controls`, which this crate does not enable.
@@ -116,15 +116,16 @@ fn global() -> Option<&'static Global> {
                 lpfnWndProc: Some(wnd_proc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
-                // Null icon/cursor/brush: no shell list entry, and no
-                // WM_ERASEBKGND fighting the DirectComposition surface.
-                hIcon: Default::default(),
+                // The icon comes from the exe's first resource (`app.rc`):
+                // WM_GETICON / Alt-Tab / taskbar previews all pick it up.
+                // A missing resource leaves these null — never fatal.
+                hIcon: tray::load_icon().unwrap_or_default(),
                 hCursor: Default::default(),
                 hbrBackground: Default::default(),
                 lpszMenuName: Default::default(),
                 lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
                 hInstance: instance,
-                hIconSm: Default::default(),
+                hIconSm: tray::load_icon().unwrap_or_default(),
             };
 
             let atom = unsafe { RegisterClassExW(&class) };
@@ -465,6 +466,15 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        // Tray callback: left click toggles, right click shows the menu. The
+        // queue push happens here so `State` stays private to this module.
+        msg if msg == tray::WM_TRAY => {
+            if let Some(event) = tray::on_message(hwnd, lparam) {
+                push_event(hwnd, event);
+            }
+            LRESULT(0)
+        }
+
         _ => {
             let taskbar_created = *TASKBAR_CREATED.get_or_init(|| {
                 let name = wide("TaskbarCreated");
@@ -472,8 +482,10 @@ unsafe extern "system" fn wnd_proc(
             });
             if taskbar_created != 0 && msg == taskbar_created {
                 // T14: Explorer restarted. The island survives; repaint so shell
-                // state and the swapchain agree again.
+                // state and the swapchain agree again — and the tray icon comes
+                // back, since Explorer rebuilt its own store from scratch.
                 log::info!("arc: TaskbarCreated — shell restarted, requesting redraw");
+                tray::refresh();
                 push_event(hwnd, Event::Redraw);
                 LRESULT(0)
             } else {
@@ -559,6 +571,11 @@ impl Overlay {
         };
 
         overlay.register_hotkey();
+        // Tray entry: a second, conventional way to reach the island. Failure
+        // is logged inside and never blocks startup (like a lost hotkey).
+        if tray::install(hwnd) {
+            log::debug!("arc: tray icon installed");
+        }
         // Place once immediately so the island is never briefly visible at 0,0.
         overlay.apply_placement(185.0, 32.0);
 
@@ -834,6 +851,8 @@ impl Overlay {
 
 impl Drop for Overlay {
     fn drop(&mut self) {
+        // Before the HWND dies: the shell needs a live window to accept NIM_DELETE.
+        tray::remove();
         if self.hotkey_registered {
             // SAFETY: unregistering a hotkey we registered against our own HWND.
             let _ = unsafe { UnregisterHotKey(Some(self.hwnd), HOTKEY_TOGGLE) };

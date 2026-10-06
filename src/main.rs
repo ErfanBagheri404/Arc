@@ -1,4 +1,4 @@
-//! Arc — a dynamic-island-style notch overlay for Windows.
+//! Arc — a dynamic-island-style overlay for Windows.
 //!
 //! Layers (see `docs/05-ARCHITECTURE.md`): platform → core → app → services → ui.
 //! Only `platform` may touch Win32; `ui` is a pure function of state.
