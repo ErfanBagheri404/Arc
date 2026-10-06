@@ -9,6 +9,7 @@
 
 pub mod dpi;
 pub mod render;
+pub mod tray;
 pub mod window;
 
 // Re-exports consumed by `app`; see the note on the core barrel about
