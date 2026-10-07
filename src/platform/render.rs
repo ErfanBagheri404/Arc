@@ -20,10 +20,20 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1CreateFactory, ID2D1Factory, ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE,
+    D2D1_LAYER_PARAMETERS, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    D2D1_RENDER_TARGET_USAGE_NONE,
 };
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICFormatConverter,
+    IWICImagingFactory, IWICPalette, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom,
+    WICDecodeMetadataCacheOnDemand,
+};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
 };
@@ -49,9 +59,11 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_SCALING_STRETCH,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
+use windows_numerics::Matrix3x2;
 
 use crate::core::geom::{squircle_segments, CornerRadii, Rect, Rgba};
-use crate::core::scene::{Align, Frame, Node, TextStyle, Weight};
+use crate::core::imagedb;
+use crate::core::scene::{Align, Frame, ImageHandle, Node, TextStyle, Weight};
 
 /// Runtime counters for the debug overlay and the release perf gate
 /// (idle presents must be 0; see docs/05-ARCHITECTURE.md §9).
@@ -218,6 +230,15 @@ pub struct Renderer {
     d2d_factory: Option<ID2D1Factory>,
     dwrite: Option<IDWriteFactory>,
     formats: HashMap<FormatKey, IDWriteTextFormat>,
+    /// WIC factory, built lazily on the first image draw. `None` until then, and
+    /// permanently `None` if the platform has no imaging stack.
+    wic: Option<IWICImagingFactory>,
+    /// CPU-side decode cache, keyed by the handle `ui` interned the bytes under.
+    /// Holds the converted 32bpp source, not a GPU bitmap: the render target is
+    /// rebuilt from the swapchain every frame, so a device bitmap cached across
+    /// frames lands in the wrong resource domain. `None` is a cached *failure* —
+    /// a handle that failed once must not be re-decoded every frame.
+    images: HashMap<ImageHandle, Option<IWICFormatConverter>>,
     probe: PerfProbe,
     /// True when the GPU chain could not be built (RDP, no GPU, CI). Everything
     /// except drawing still works, so the app runs and tests pass anywhere.
@@ -242,6 +263,8 @@ impl Renderer {
             d2d_factory: None,
             dwrite: None,
             formats: HashMap::new(),
+            wic: None,
+            images: HashMap::new(),
             probe: PerfProbe::default(),
             degraded: true,
             dead: false,
@@ -455,12 +478,7 @@ impl Renderer {
                 rect,
                 handle,
                 radii,
-            } => {
-                // Phase 2 wires WIC decoding in; until then every handle renders as a
-                // placeholder so the layout is still reviewable.
-                let _ = handle;
-                self.fill_squircle(target, *rect, *radii, Rgba::rgb(0.16, 0.16, 0.18));
-            }
+            } => self.draw_image(target, *rect, *handle, *radii),
             Node::Bar {
                 rect,
                 progress,
@@ -533,6 +551,142 @@ impl Renderer {
             }
         }
         unsafe { target.FillGeometry(&path, &brush, None) };
+    }
+
+    /// Decode `bytes` into a 32bpp premultiplied WIC source, cached by `handle`.
+    ///
+    /// Returns `None` for an undecodable payload, and that verdict is cached too
+    /// so a bad image costs one decode attempt, not one per frame. The app
+    /// initialises COM on the thread that calls `present`, so this does not.
+    fn decoded(&mut self, handle: ImageHandle) -> Option<IWICFormatConverter> {
+        if let Some(cached) = self.images.get(&handle) {
+            return cached.clone();
+        }
+        let decoded = self.decode(handle);
+        self.images.insert(handle, decoded.clone());
+        decoded
+    }
+
+    fn decode(&mut self, handle: ImageHandle) -> Option<IWICFormatConverter> {
+        let bytes = imagedb::bytes(handle)?;
+        if bytes.is_empty() {
+            return None;
+        }
+        if self.wic.is_none() {
+            // Build it once. A machine with no imaging stack keeps `None` and the
+            // placeholder fill, rather than retrying CoCreateInstance per frame.
+            self.wic = unsafe {
+                CoCreateInstance::<_, IWICImagingFactory>(
+                    &CLSID_WICImagingFactory,
+                    None,
+                    CLSCTX_INPROC_SERVER,
+                )
+                .ok()
+            };
+        }
+        let wic = self.wic.clone()?;
+        unsafe {
+            let stream = SHCreateMemStream(Some(&bytes))?;
+            let decoder = wic
+                .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+                .ok()?;
+            let frame = decoder.GetFrame(0).ok()?;
+            let converter = wic.CreateFormatConverter().ok()?;
+            converter
+                .Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapDitherTypeNone,
+                    None::<&IWICPalette>,
+                    0.0,
+                    WICBitmapPaletteTypeCustom,
+                )
+                .ok()?;
+            Some(converter)
+        }
+    }
+
+    /// Draw a decoded image, clipped to the same squircle outline the fills use so
+    /// album art corners match the island's.
+    fn draw_image(
+        &mut self,
+        target: &ID2D1RenderTarget,
+        rect: Rect,
+        handle: ImageHandle,
+        radii: CornerRadii,
+    ) {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let Some(source) = self.decoded(handle) else {
+            self.fill_squircle(target, rect, radii, Rgba::rgb(0.16, 0.16, 0.18));
+            return;
+        };
+        let properties = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let Ok(bitmap) = (unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) }) else {
+            self.fill_squircle(target, rect, radii, Rgba::rgb(0.16, 0.16, 0.18));
+            return;
+        };
+
+        // Art is not a fill: a squircle mask needs a geometry layer, because a
+        // bitmap draws as one opaque quad and the layer is what cuts its corners.
+        let Some(factory) = self.d2d_factory.clone() else {
+            return;
+        };
+        let Ok(path) = (unsafe { factory.CreatePathGeometry() }) else {
+            return;
+        };
+        if let Ok(sink) = unsafe { path.Open() } {
+            unsafe {
+                sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+                for step in outline_steps(&rect, radii) {
+                    match step {
+                        OutlineStep::Begin(p) => sink.BeginFigure(point(p), D2D1_FIGURE_BEGIN_FILLED),
+                        OutlineStep::Line(p) => sink.AddLine(point(p)),
+                        OutlineStep::Bezier(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                            point1: point(c1),
+                            point2: point(c2),
+                            point3: point(to),
+                        }),
+                        OutlineStep::End => sink.EndFigure(D2D1_FIGURE_END_CLOSED),
+                    }
+                }
+                let _ = sink.Close();
+            }
+        }
+
+        let layer: Option<ID2D1Layer> = unsafe { target.CreateLayer(None).ok() };
+        let Some(layer) = layer else {
+            unsafe { target.DrawBitmap(&bitmap, Some(&to_rect(rect)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+            return;
+        };
+        let parameters = D2D1_LAYER_PARAMETERS {
+            contentBounds: to_rect(rect),
+            geometricMask: std::mem::ManuallyDrop::new(path.cast::<ID2D1Geometry>().ok()),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+        };
+        unsafe {
+            target.PushLayer(&parameters, &layer);
+            target.DrawBitmap(
+                &bitmap,
+                Some(&to_rect(rect)),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+            target.PopLayer();
+        }
     }
 
     fn brush(&self, target: &ID2D1RenderTarget, color: Rgba) -> Option<ID2D1SolidColorBrush> {
@@ -647,6 +801,17 @@ impl Renderer {
     #[allow(dead_code)]
     pub fn degraded(&self) -> bool {
         self.degraded
+    }
+}
+
+/// Convert a scene rect to the D2D float rect. Shared by text and image drawing
+/// so both hit the same bounds.
+fn to_rect(rect: Rect) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: rect.x,
+        top: rect.y,
+        right: rect.max_x(),
+        bottom: rect.max_y(),
     }
 }
 

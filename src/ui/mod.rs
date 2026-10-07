@@ -23,6 +23,7 @@ use crate::core::scene::{Align, Frame, Node, Scene, TextStyle, Weight};
 use crate::ui::layout::{island_radius, openness};
 
 pub mod layout;
+pub mod media;
 pub mod text;
 
 pub use text::{line_height, measure};
@@ -108,6 +109,9 @@ pub struct ViewState {
     pub hover_tab: Option<usize>,
     /// Content row under the cursor, if any.
     pub hover_row: Option<usize>,
+    /// What the Media tab draws. The app thread refreshes it from
+    /// `services::media` each frame; `build` stays pure.
+    pub media: crate::services::media::MediaState,
 }
 
 impl ViewState {
@@ -145,6 +149,31 @@ impl ViewState {
         row_boxes(self.island_width, self.island_height)
             .into_iter()
             .position(|(left, top, w, h)| x >= left && x <= left + w && y >= top && y <= top + h)
+    }
+
+    /// Which transport command panel-space `(x, y)` hits, if any.
+    ///
+    /// Only on the Media tab while the panel is open: the collapsed pill is
+    /// click-through, and the other tabs draw no transport row.
+    pub fn media_command(&self, x: f32, y: f32) -> Option<crate::services::media::Command> {
+        if self.active_tab != MEDIA_TAB || !self.content_visible() {
+            return None;
+        }
+        let top = row_band_top();
+        // The bar is the seek target: a click maps its x to a fraction of the
+        // track, so the user can jump anywhere without dragging.
+        let bar = media::bar_rect(self.island_width, self.island_height, top);
+        // The bar is 4 px; inflate the hitbox so a click near it still seeks.
+        let pad = 6.0;
+        if x >= bar.x && x <= bar.x + bar.w && y >= bar.y - pad && y <= bar.max_y() + pad {
+            let frac = ((x - bar.x) / bar.w.max(1.0)).clamp(0.0, 1.0);
+            let secs = (self.media.duration?.as_secs_f32() * frac) as u64;
+            return Some(crate::services::media::Command::Seek(secs));
+        }
+        media::transport(self.island_width, self.island_height, top)
+            .into_iter()
+            .find(|(r, _)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
+            .map(|(_, cmd)| cmd)
     }
 
     /// Whether the panel content (tabs, rows, footer) is on screen at all.
@@ -252,10 +281,17 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
     let tabs = tab_strip(fw, fh, header_height(), state);
     let tab_bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
     out.extend(tabs);
-    out.extend(content_rows(fw, fh, tab_bottom, state));
+    if state.active_tab == MEDIA_TAB {
+        out.extend(media::content(fw, fh, tab_bottom, &state.media));
+    } else {
+        out.extend(content_rows(fw, fh, tab_bottom, state));
+    }
     out.extend(footer_block(fw, fh));
     out
 }
+
+/// Index in [`TABS`] of the Media tab — the one with a real content surface.
+pub const MEDIA_TAB: usize = 0;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -943,9 +979,17 @@ mod tests {
         }
     }
 
+    /// A Stats-tab panel: the Media tab draws real content, so the placeholder
+    /// row assertions belong to a placeholder tab.
+    fn stats_panel() -> Frame {
+        let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
+        v.active_tab = 1;
+        build(&v)
+    }
+
     #[test]
     fn panel_content_has_three_placeholder_rows() {
-        let f = panel();
+        let f = stats_panel();
         let rows = row_rects(&f);
         assert_eq!(rows.len(), CONTENT_ROWS, "{:#?}", f.scene.nodes);
         for w in rows.windows(2) {
@@ -965,7 +1009,7 @@ mod tests {
 
     #[test]
     fn content_rows_use_the_reference_4pct_micro_fill_and_r8() {
-        let f = panel();
+        let f = stats_panel();
         let rows = row_rects(&f);
         assert_eq!(rows.len(), CONTENT_ROWS);
         let inner = PANEL_W_REF - PANEL_PAD * 2.0;
