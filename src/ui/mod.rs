@@ -63,6 +63,8 @@ pub const FOOTER_BOTTOM_PAD: f32 = 12.0;
 pub const PILL_GLYPH: f32 = 14.0;
 /// Corner radius of the collapsed pill's center glyph.
 pub const PILL_GLYPH_RADIUS: f32 = 3.0;
+/// Gap below the collapsed pill's inline progress bar.
+pub const PILL_PROGRESS_BOTTOM_PAD: f32 = 6.0;
 /// Placeholder clock. A real tab replaces this with elapsed/remaining time.
 pub const FOOTER_CLOCK: &str = "00:00";
 
@@ -241,7 +243,15 @@ pub fn build(state: &ViewState) -> Frame {
         });
     }
 
-    // 3. Panel content: skipped below the fade-in threshold, alpha-scaled above
+    // 3. Collapsed live activity: while a track plays and the island is closed,
+    //    the pill grows a hairline progress bar along its bottom edge. It fades
+    //    out on the same curve as the glyph so the panel never shows two
+    //    progress bars at once.
+    if let Some(bar) = pill_progress(fw, fh, state, glyph_opacity) {
+        scene.push(bar);
+    }
+
+    // 4. Panel content: skipped below the fade-in threshold, alpha-scaled above
     //    it, so it materializes instead of popping in at a fixed size.
     let content_opacity = layout::ease(
         (open - layout::CONTENT_FADE_IN_START) / (1.0 - layout::CONTENT_FADE_IN_START),
@@ -263,6 +273,46 @@ pub fn build(state: &ViewState) -> Frame {
         size: (fw, fh),
         scene,
     }
+}
+
+/// The collapsed pill's inline progress bar, or `None` when nothing is playing
+/// or the island is opening. Geometry is deliberately independent of the panel's
+/// bar: this one hugs the pill's own bottom edge.
+fn pill_progress(fw: f32, fh: f32, state: &ViewState, opacity: f32) -> Option<Node> {
+    let m = &state.media;
+    if opacity <= 0.0 || !m.playing {
+        return None;
+    }
+    // Duration is unknown for some sources (live streams); no bar then, rather
+    // than a bar pinned at zero.
+    let span = m.duration?.as_secs_f32();
+    if span <= 0.0 {
+        return None;
+    }
+    let frac = (m.position.as_secs_f32() / span).clamp(0.0, 1.0);
+
+    let inset = PANEL_PAD;
+    let w = (fw - inset * 2.0).max(0.0);
+    let h = 2.0;
+    let y = fh - PILL_PROGRESS_BOTTOM_PAD - h;
+    let fill = layout::fade(m.accent.unwrap_or(crate::core::geom::Rgba::rgb(0.8, 0.2, 0.3)), opacity);
+
+    let mut out = vec![Node::RoundRect {
+        rect: put(fw, fh, Rect::new(inset, y, w, h)),
+        radii: CornerRadii::uniform(h / 2.0),
+        fill: layout::fade(Rgba::rgb(1.0, 1.0, 1.0), 0.12 * opacity),
+    }];
+    if frac > 0.0 {
+        out.push(Node::RoundRect {
+            rect: put(fw, fh, Rect::new(inset, y, w * frac, h)),
+            radii: CornerRadii::uniform(h / 2.0),
+            fill,
+        });
+    }
+    Some(Node::Group {
+        rect: Rect::new(0.0, 0.0, fw, fh),
+        children: out,
+    })
 }
 
 /// Clamp a rect into the frame. Every emitted rect goes through here, which is
@@ -601,6 +651,22 @@ mod tests {
         // Above and below the strip band.
         assert_eq!(v.tab_at(first_left + 2.0, y - TAB_H), None);
         assert_eq!(v.tab_at(first_left + 2.0, y + TAB_H), None);
+    }
+
+    #[test]
+    fn collapsed_pill_shows_inline_progress_only_while_playing() {
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        // Nothing playing: pill is body + glyph only.
+        assert_eq!(all_nodes(&build(&v)).len(), 2);
+        v.media.playing = true;
+        v.media.position = std::time::Duration::from_secs(30);
+        v.media.duration = Some(std::time::Duration::from_secs(60));
+        // Playing: the bar's two leaves (track + accent fill) join the scene.
+        let f = build(&v);
+        assert_eq!(all_nodes(&f).len(), 4, "playing pill must carry a bar");
+        // Live stream with unknown duration: no bar to pin at zero.
+        v.media.duration = None;
+        assert_eq!(all_nodes(&build(&v)).len(), 2);
     }
 
     #[test]
