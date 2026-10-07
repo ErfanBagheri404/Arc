@@ -65,7 +65,7 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
     out.push(Node::Image {
         rect: put(fw, fh, art),
         handle: state.art.map(crate::core::scene::ImageHandle).unwrap_or_default(),
-        radii: CornerRadii::uniform(10.0),
+        radii: CornerRadii::uniform(8.0),
     });
 
     // 2. Title / artist column to the right of the art.

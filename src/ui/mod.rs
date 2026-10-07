@@ -661,9 +661,9 @@ mod tests {
         v.media.playing = true;
         v.media.position = std::time::Duration::from_secs(30);
         v.media.duration = Some(std::time::Duration::from_secs(60));
-        // Playing: the bar's two leaves (track + accent fill) join the scene.
+        // Playing: the bar's group + two leaves (track, accent fill) join in.
         let f = build(&v);
-        assert_eq!(all_nodes(&f).len(), 4, "playing pill must carry a bar");
+        assert_eq!(all_nodes(&f).len(), 5);
         // Live stream with unknown duration: no bar to pin at zero.
         v.media.duration = None;
         assert_eq!(all_nodes(&build(&v)).len(), 2);
