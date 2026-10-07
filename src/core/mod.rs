@@ -10,6 +10,8 @@
 // churn every `use` site in a later phase) — see docs/05-ARCHITECTURE.md.
 #[allow(dead_code)]
 pub mod anim;
+pub mod color;
+pub mod imagedb;
 #[allow(dead_code)]
 pub mod geom;
 #[allow(dead_code)]

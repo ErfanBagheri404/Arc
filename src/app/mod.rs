@@ -11,6 +11,7 @@ pub use state::IslandState;
 use std::time::{Duration, Instant};
 
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
+use crate::services::media::Media;
 use crate::ui;
 
 /// Nominal frame budget. Springs integrate against real elapsed time, so a slower
@@ -39,6 +40,10 @@ pub fn run() -> std::process::ExitCode {
         // refused registration).
         log::warn!("global hotkey Ctrl+Shift+A was not registered; toggle unavailable");
     }
+
+    // The media worker owns its own COM apartment and only publishes plain data,
+    // so the UI thread never touches WinRT. Started once for the process.
+    let media = Media::start();
 
     let mut state = IslandState::collapsed();
     // The tab selection and hover persist across frames; everything else the UI
@@ -77,8 +82,11 @@ pub fn run() -> std::process::ExitCode {
                 // Clicks arrive in physical client pixels; the UI lays out in
                 // logical ones, so scale before hit-testing.
                 Event::LeftClick { x, y } => {
-                    let hit = view.click_tab(x / scale, y / scale);
-                    if hit.is_some() {
+                    let (lx, ly) = (x / scale, y / scale);
+                    if let Some(cmd) = view.media_command(lx, ly) {
+                        media.send(cmd);
+                        redraw = true;
+                    } else if view.click_tab(lx, ly).is_some() {
                         redraw = true;
                     }
                 }
@@ -100,6 +108,14 @@ pub fn run() -> std::process::ExitCode {
                 Event::Resized { .. } | Event::Redraw => redraw = true,
                 Event::Quit => return std::process::ExitCode::SUCCESS,
             }
+        }
+
+        // Pull the latest snapshot every iteration. The worker publishes at 1 Hz,
+        // so this is a mutex read, not a COM call.
+        let snapshot = media.snapshot();
+        if snapshot != view.media {
+            view.media = snapshot;
+            redraw = true;
         }
 
         let now = Instant::now();
