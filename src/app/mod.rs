@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
 use crate::services::media::Media;
+use crate::services::metrics::Sampler;
 use crate::ui;
 
 /// Nominal frame budget. Springs integrate against real elapsed time, so a slower
@@ -43,6 +44,9 @@ pub fn run() -> std::process::ExitCode {
 
     // The media worker owns its own COM apartment and only publishes plain data,
     // so the UI thread never touches WinRT. Started once for the process.
+    // The metrics sampler also runs on its own thread and publishes a plain
+    // snapshot; PDH and Win32 reads never happen on the UI thread.
+    let stats = Sampler::spawn();
     let media = Media::start();
 
     let mut state = IslandState::collapsed();
@@ -115,6 +119,14 @@ pub fn run() -> std::process::ExitCode {
         let snapshot = media.snapshot();
         if snapshot != view.media {
             view.media = snapshot;
+            redraw = true;
+        }
+
+        // Same rule for the sampler: the 1 Hz worker republishes, this only
+        // notices a change and marks the frame dirty.
+        let latest = stats.snapshot();
+        if latest.current != view.stats.current {
+            view.stats = latest;
             redraw = true;
         }
 

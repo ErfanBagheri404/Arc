@@ -24,6 +24,7 @@ use crate::ui::layout::{island_radius, openness};
 
 pub mod layout;
 pub mod media;
+pub mod stats;
 pub mod text;
 
 pub use text::{line_height, measure};
@@ -114,6 +115,9 @@ pub struct ViewState {
     /// What the Media tab draws. The app thread refreshes it from
     /// `services::media` each frame; `build` stays pure.
     pub media: crate::services::media::MediaState,
+    /// What the Stats tab draws. Refreshed from the metrics sampler each frame,
+    /// same rule as `media`: `build` stays pure.
+    pub stats: crate::services::metrics::Stats,
 }
 
 impl ViewState {
@@ -333,6 +337,8 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
     out.extend(tabs);
     if state.active_tab == MEDIA_TAB {
         out.extend(media::content(fw, fh, tab_bottom, &state.media));
+    } else if state.active_tab == STATS_TAB {
+        out.extend(stats::content(fw, fh, tab_bottom, &state.stats));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -342,6 +348,9 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
 
 /// Index in [`TABS`] of the Media tab — the one with a real content surface.
 pub const MEDIA_TAB: usize = 0;
+pub const STATS_TAB: usize = 1;
+/// First tab that still draws the generic placeholder rows (Timer).
+const PLACEHOLDER_TAB: usize = 2;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -1047,15 +1056,16 @@ mod tests {
 
     /// A Stats-tab panel: the Media tab draws real content, so the placeholder
     /// row assertions belong to a placeholder tab.
-    fn stats_panel() -> Frame {
+    /// A panel on a tab that still draws the generic placeholder rows.
+    fn placeholder_panel() -> Frame {
         let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
-        v.active_tab = 1;
+        v.active_tab = PLACEHOLDER_TAB;
         build(&v)
     }
 
     #[test]
     fn panel_content_has_three_placeholder_rows() {
-        let f = stats_panel();
+        let f = placeholder_panel();
         let rows = row_rects(&f);
         assert_eq!(rows.len(), CONTENT_ROWS, "{:#?}", f.scene.nodes);
         for w in rows.windows(2) {
@@ -1075,7 +1085,7 @@ mod tests {
 
     #[test]
     fn content_rows_use_the_reference_4pct_micro_fill_and_r8() {
-        let f = stats_panel();
+        let f = placeholder_panel();
         let rows = row_rects(&f);
         assert_eq!(rows.len(), CONTENT_ROWS);
         let inner = PANEL_W_REF - PANEL_PAD * 2.0;
