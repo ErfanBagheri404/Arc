@@ -539,15 +539,14 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
         }
         Hud::Volume { percent, muted } => (
             if *muted { PILL_AMBER } else { PILL_GREEN },
-            if *muted {
-                "muted".to_string()
-            } else {
-                format!("{percent} %")
-            },
-            Some(*percent as f32 / 100.0),
-        ),
-        Hud::Dnd => (PILL_AMBER, "focus".to_string(), None),
-    };
+                    if *muted {
+                        "muted".to_string()
+                    } else {
+                        format!("{percent} %")
+                    },
+                    Some(*percent as f32 / 100.0),
+                ),
+            };
 
     let mut out = vec![Node::RoundRect {
         rect: put(fw, fh, track),
