@@ -4,3 +4,4 @@
 
 pub mod media;
 pub mod metrics;
+pub mod power;

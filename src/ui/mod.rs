@@ -86,6 +86,10 @@ const PILL_GREY: Rgba = Rgba {
     a: 1.0,
 };
 
+/// HUD fills: charging/healthy (iOS-ish green) and warning (amber).
+const PILL_GREEN: Rgba = Rgba::rgb(0.20, 0.78, 0.35);
+const PILL_AMBER: Rgba = Rgba::rgb(0.95, 0.62, 0.11);
+
 /// Tab label style: 12 px regular, dimmed grey (the reference rests on
 /// white/grey, with a single album-art accent appearing elsewhere in the shell).
 const TAB_LABEL: TextStyle = TextStyle {
@@ -118,6 +122,9 @@ pub struct ViewState {
     /// What the Stats tab draws. Refreshed from the metrics sampler each frame,
     /// same rule as `media`: `build` stays pure.
     pub stats: crate::services::metrics::Stats,
+    /// Transient pill overlay, if one is up. Replaces the idle glyph while it
+    /// lasts; the app owns the timer, the UI only draws it.
+    pub hud: Option<crate::app::hud::Hud>,
 }
 
 impl ViewState {
@@ -239,12 +246,23 @@ pub fn build(state: &ViewState) -> Frame {
     //    dissolves instead of vanishing under the arriving panel content.
     let glyph_opacity = 1.0 - layout::ease(open / layout::PILL_GLYPH_FADE_OUT_END);
     if glyph_opacity > 0.0 {
-        let g = PILL_GLYPH;
-        scene.push(Node::RoundRect {
-            rect: put(fw, fh, Rect::new((fw - g) / 2.0, (fh - g) / 2.0, g, g)),
-            radii: CornerRadii::uniform(PILL_GLYPH_RADIUS),
-            fill: layout::fade(PILL_GREY, glyph_opacity),
-        });
+        // A live HUD takes the glyph's slot: showing both would stack two
+        // centred marks in a pill that only fits one.
+        match &state.hud {
+            Some(hud) => {
+                for n in pill_hud(fw, fh, hud, glyph_opacity) {
+                    scene.push(n);
+                }
+            }
+            None => {
+                let g = PILL_GLYPH;
+                scene.push(Node::RoundRect {
+                    rect: put(fw, fh, Rect::new((fw - g) / 2.0, (fh - g) / 2.0, g, g)),
+                    radii: CornerRadii::uniform(PILL_GLYPH_RADIUS),
+                    fill: layout::fade(PILL_GREY, glyph_opacity),
+                });
+            }
+        }
     }
 
     // 3. Collapsed live activity: while a track plays and the island is closed,
@@ -475,6 +493,82 @@ fn row_rects_below(fw: f32, fh: f32, top: f32) -> Vec<(f32, f32, f32, f32)> {
         .collect()
 }
 
+/// Transient pill HUD: a coloured fill plus its value, occupying the glyph slot.
+///
+/// Shape and text only — the glyph table is still placeholder squares (real
+/// outlines land in Phase 8), so an icon-based HUD would draw a grey box.
+fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<Node> {
+    use crate::app::hud::Hud;
+    // A short inset fill behind the readout: the pill is 34 px tall, so the HUD
+    // reads as a tinted track rather than a label floating on black.
+    let h = (fh - 10.0).max(4.0);
+    let track = Rect::new((fw - PILL_HUD_W) / 2.0, (fh - h) / 2.0, PILL_HUD_W, h);
+    let (fill_col, text, frac) = match hud {
+        Hud::Battery {
+            percent,
+            charging,
+            low,
+        } => {
+            let col = if *charging {
+                PILL_GREEN
+            } else if *low {
+                PILL_AMBER
+            } else {
+                PILL_GREY
+            };
+            (
+                col,
+                format!("{percent} %"),
+                Some(*percent as f32 / 100.0),
+            )
+        }
+        Hud::Volume { percent, muted } => (
+            if *muted { PILL_AMBER } else { PILL_GREEN },
+            if *muted {
+                "muted".to_string()
+            } else {
+                format!("{percent} %")
+            },
+            Some(*percent as f32 / 100.0),
+        ),
+        Hud::Dnd => (PILL_AMBER, "focus".to_string(), None),
+    };
+
+    let mut out = vec![Node::RoundRect {
+        rect: put(fw, fh, track),
+        radii: CornerRadii::uniform(track.h / 2.0),
+        fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), opacity),
+    }];
+    // Battery and volume fill the track like a gauge; DND has no magnitude and
+    // stays a flat badge.
+    if let Some(f) = frac {
+        let w = track.w * f.clamp(0.0, 1.0);
+        if w > 0.5 {
+            out.push(Node::RoundRect {
+                rect: put(fw, fh, Rect::new(track.x, track.y, w, track.h)),
+                radii: CornerRadii::uniform(track.h / 2.0),
+                fill: layout::fade(fill_col, opacity),
+            });
+        }
+    }
+    let style = TextStyle::numeric(11.0);
+    let tw = measure(&text, &style);
+    let th = line_height(&style);
+    out.push(Node::Text {
+        rect: put(
+            fw,
+            fh,
+            Rect::new((fw - tw) / 2.0, (fh - th) / 2.0, tw, th),
+        ),
+        text,
+        style,
+    });
+    out
+}
+
+/// Width of the HUD's gauge track inside the pill.
+const PILL_HUD_W: f32 = 54.0;
+
 /// Content area: `CONTENT_ROWS` placeholder rows at the reference's 2 % white
 /// micro-fill, filling the space between the tab strip and the footer.
 ///
@@ -676,6 +770,22 @@ mod tests {
         // Live stream with unknown duration: no bar to pin at zero.
         v.media.duration = None;
         assert_eq!(all_nodes(&build(&v)).len(), 2);
+    }
+
+    #[test]
+    fn a_hud_replaces_the_idle_glyph_in_the_pill() {
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        // Idle: body + glyph.
+        assert_eq!(all_nodes(&build(&v)).len(), 2);
+        v.hud = Some(crate::app::hud::Hud::Battery {
+            percent: 42,
+            charging: true,
+            low: false,
+        });
+        let f = build(&v);
+        // Body + HUD track + gauge fill + readout text, and no idle glyph.
+        assert_eq!(all_nodes(&f).len(), 4, "{:#?}", f.scene.nodes);
+        assert!(find_text(&f, "42 %").is_some());
     }
 
     #[test]
