@@ -4,6 +4,7 @@
 //! changed or a spring is mid-flight, and parks otherwise. Idle cost must be zero
 //! presents and ~0% CPU — that budget is a release gate (docs/05 §9).
 
+pub mod hud;
 mod state;
 
 pub use state::IslandState;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
 use crate::services::media::Media;
 use crate::services::metrics::Sampler;
+use crate::services::power;
 use crate::ui;
 
 /// Nominal frame budget. Springs integrate against real elapsed time, so a slower
@@ -23,6 +25,48 @@ const NOMINAL_FRAME: Duration = Duration::from_micros(16_667);
 /// pointer has to be sampled rather than awaited. 25 ms is under one frame at
 /// 40 Hz and still leaves the process ~0% CPU.
 const IDLE_POLL: Duration = Duration::from_millis(25);
+/// Power-state poll cadence. `GetSystemPowerStatus` is cheap, but there is no
+/// change notification worth wiring, and 500 ms is well inside the HUD's 3 s
+/// window, so a plug/unplug is never missed.
+const POWER_POLL: Duration = Duration::from_millis(500);
+
+/// Arm a battery HUD when the power state *changes* to something worth showing.
+///
+/// Firing on every poll would pin the HUD to the pill forever; the point is the
+/// transition (plugged in, unplugged, crossed into low), not the steady state.
+/// Returns `true` when the layer was armed and a repaint is due.
+fn power_hud(
+    p: &power::Power,
+    last: &mut Option<power::Power>,
+    now: Instant,
+    layer: &mut hud::HudLayer,
+) -> bool {
+    let previous = last.replace(*p);
+    // No battery (desktop): nothing to show, and no transition to react to.
+    let Some(percent) = p.percent else {
+        return false;
+    };
+    let show = match previous {
+        // First reading: only announce a low battery, never a routine 80 %.
+        None => power::is_low(Some(percent)),
+        Some(prev) => {
+            prev.charging != p.charging
+                || power::is_low(Some(percent)) != power::is_low(prev.percent)
+        }
+    };
+    if !show {
+        return false;
+    }
+    layer.arm(
+        hud::Hud::Battery {
+            percent,
+            charging: p.charging,
+            low: !p.charging && power::is_low(Some(percent)),
+        },
+        now,
+    );
+    true
+}
 
 /// Entry point.
 pub fn run() -> std::process::ExitCode {
@@ -48,6 +92,12 @@ pub fn run() -> std::process::ExitCode {
     // snapshot; PDH and Win32 reads never happen on the UI thread.
     let stats = Sampler::spawn();
     let media = Media::start();
+
+    // HUD layer + the power reading it reacts to. Owned by the run loop; the UI
+    // only ever sees the current HUD through `ViewState`.
+    let mut hud = hud::HudLayer::default();
+    let mut last_power = Instant::now() - POWER_POLL;
+    let mut last_power_state: Option<power::Power> = None;
 
     let mut state = IslandState::collapsed();
     // The tab selection and hover persist across frames; everything else the UI
@@ -132,6 +182,25 @@ pub fn run() -> std::process::ExitCode {
 
         let now = Instant::now();
         let dt = now.duration_since(last).min(Duration::from_millis(100));
+
+        // HUD layer: expiry first (a HUD that just went away needs a repaint),
+        // then the power poll. The getter is cheap and in-process, so it runs on
+        // a half-second cadence right here rather than on a worker thread.
+        if hud.step(now) {
+            view.hud = None;
+            redraw = true;
+        }
+        if now.duration_since(last_power) >= POWER_POLL {
+            last_power = now;
+            if let Some(p) = power::read() {
+                let armed = power_hud(&p, &mut last_power_state, now, &mut hud);
+                if armed {
+                    view.hud = hud.current();
+                    redraw = true;
+                }
+            }
+        }
+
         // Hover is polled, not event-driven (the collapsed window is
         // click-through), so it has to be stepped even on frames where nothing
         // else woke us up.
