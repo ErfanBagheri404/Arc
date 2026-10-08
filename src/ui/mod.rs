@@ -25,6 +25,7 @@ use crate::ui::layout::{island_radius, openness};
 pub mod layout;
 pub mod media;
 pub mod stats;
+pub mod timer;
 pub mod text;
 
 pub use text::{line_height, measure};
@@ -129,6 +130,8 @@ pub struct ViewState {
     pub mic_active: bool,
     /// Top processes by CPU, from the process sampler.
     pub procs: crate::services::processes::Snapshot,
+    /// The countdown timer, owned by the app thread.
+    pub timer: crate::app::timer::Timer,
 }
 
 impl ViewState {
@@ -191,6 +194,17 @@ impl ViewState {
             .into_iter()
             .find(|(r, _)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
             .map(|(_, cmd)| cmd)
+    }
+
+    /// Which timer preset button panel-space `(x, y)` hits, if any.
+    pub fn timer_preset(&self, x: f32, y: f32) -> Option<usize> {
+        if self.active_tab != TIMER_TAB || !self.content_visible() {
+            return None;
+        }
+        let top = HEADER_Y + header_height() + HEADER_GAP;
+        timer::buttons(self.island_width, top)
+            .into_iter()
+            .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
     }
 
     /// Whether the panel content (tabs, rows, footer) is on screen at all.
@@ -374,6 +388,8 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
         out.extend(media::content(fw, fh, tab_bottom, &state.media));
     } else if state.active_tab == STATS_TAB {
         out.extend(stats::content(fw, fh, tab_bottom, &state.stats, &state.procs));
+    } else if state.active_tab == TIMER_TAB {
+        out.extend(timer::content(fw, fh, tab_bottom, &state.timer));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -384,8 +400,10 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
 /// Index in [`TABS`] of the Media tab — the one with a real content surface.
 pub const MEDIA_TAB: usize = 0;
 pub const STATS_TAB: usize = 1;
-/// First tab that still draws the generic placeholder rows (Timer).
-const PLACEHOLDER_TAB: usize = 2;
+/// The Timer tab — real content behind it now.
+pub const TIMER_TAB: usize = 2;
+/// The Clipboard tab — still placeholder rows.
+pub const CLIPBOARD_TAB: usize = 3;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -541,22 +559,31 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
         }
         Hud::Volume { percent, muted } => (
             if *muted { PILL_AMBER } else { PILL_GREEN },
-                    if *muted {
-                        "muted".to_string()
-                    } else {
-                        format!("{percent} %")
-                    },
-                    Some(*percent as f32 / 100.0),
-                ),
-            };
+            if *muted {
+                "muted".to_string()
+            } else {
+                format!("{percent} %")
+            },
+            Some(*percent as f32 / 100.0),
+        ),
+        Hud::Timer { remaining, .. } => (
+            PILL_GREEN,
+            format!(
+                "{}:{:02}",
+                remaining / 60,
+                remaining % 60
+            ),
+            None,
+        ),
+    };
 
     let mut out = vec![Node::RoundRect {
         rect: put(fw, fh, track),
         radii: CornerRadii::uniform(track.h / 2.0),
         fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), opacity),
     }];
-    // Battery and volume fill the track like a gauge; DND has no magnitude and
-    // stays a flat badge.
+    // Battery and volume fill the track like a gauge; the countdown has no
+    // meaningful magnitude on a short track, so it stays a flat badge.
     if let Some(f) = frac {
         let w = track.w * f.clamp(0.0, 1.0);
         if w > 0.5 {
@@ -1195,7 +1222,7 @@ mod tests {
     /// A panel on a tab that still draws the generic placeholder rows.
     fn placeholder_panel() -> Frame {
         let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
-        v.active_tab = PLACEHOLDER_TAB;
+        v.active_tab = crate::ui::CLIPBOARD_TAB;
         build(&v)
     }
 

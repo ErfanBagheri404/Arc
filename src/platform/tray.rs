@@ -14,7 +14,8 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_INFOTIP_FLAGS, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HICON, IMAGE_ICON,
@@ -35,10 +36,17 @@ const ID_QUIT: usize = 1;
 // their values are fixed part of the Win32 ABI — same pattern as
 // `WM_MOUSELEAVE` in `window.rs`.
 const NIM_ADD: NOTIFY_ICON_MESSAGE = NOTIFY_ICON_MESSAGE(0);
+const NIM_MODIFY: NOTIFY_ICON_MESSAGE = NOTIFY_ICON_MESSAGE(1);
 const NIM_DELETE: NOTIFY_ICON_MESSAGE = NOTIFY_ICON_MESSAGE(2);
 const NIF_MESSAGE: NOTIFY_ICON_DATA_FLAGS = NOTIFY_ICON_DATA_FLAGS(0x1);
 const NIF_ICON: NOTIFY_ICON_DATA_FLAGS = NOTIFY_ICON_DATA_FLAGS(0x2);
 const NIF_TIP: NOTIFY_ICON_DATA_FLAGS = NOTIFY_ICON_DATA_FLAGS(0x4);
+/// A classic balloon (timer-done toast). Deprecated in favour of toasts by the
+/// shell, but still the only `Shell_NotifyIcon` path that needs no packaged
+/// identity — right for an unpackaged exe.
+const NIF_INFO: NOTIFY_ICON_DATA_FLAGS = NOTIFY_ICON_DATA_FLAGS(0x10);
+/// `NIIF_INFO` — neutral info balloon, no error/warning glyph.
+const NIIF_INFO: u32 = 1;
 
 /// Our copy of the notification template. Raw handles are stored as `usize` so
 /// this is plain `Copy` and can live in a `Mutex` static; the shell only reads
@@ -134,6 +142,29 @@ pub fn refresh() {
     if let Some(nid) = snapshot {
         let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &nid.to_shell()) };
         let _ = unsafe { Shell_NotifyIconW(NIM_ADD, &nid.to_shell()) };
+    }
+}
+
+/// Show a balloon above the tray icon. Best effort: if there is no icon or the
+/// shell refuses, the caller's event still happened, just silently.
+pub fn notify(title: &str, text: &str) {
+    let Some(base) = *TRAY.lock().unwrap() else {
+        return;
+    };
+    let mut shell = base.to_shell();
+    shell.uFlags = NIF_INFO;
+    copy_wstr(text, &mut shell.szInfo);
+    copy_wstr(title, &mut shell.szInfoTitle);
+    shell.dwInfoFlags = NOTIFY_ICON_INFOTIP_FLAGS(NIIF_INFO);
+    // SAFETY: the shell reads the struct for the call's duration only.
+    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &shell) };
+}
+
+/// Copy `src` into the shell's fixed wide buffer, NUL-padded.
+fn copy_wstr(src: &str, buf: &mut [u16]) {
+    buf.fill(0);
+    for (slot, ch) in buf.iter_mut().zip(src.encode_utf16()) {
+        *slot = ch;
     }
 }
 
