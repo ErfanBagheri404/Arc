@@ -125,6 +125,8 @@ pub struct ViewState {
     /// Transient pill overlay, if one is up. Replaces the idle glyph while it
     /// lasts; the app owns the timer, the UI only draws it.
     pub hud: Option<crate::app::hud::Hud>,
+    /// The capture endpoint is seeing audio: a standing red dot in the pill.
+    pub mic_active: bool,
 }
 
 impl ViewState {
@@ -273,7 +275,20 @@ pub fn build(state: &ViewState) -> Frame {
         scene.push(bar);
     }
 
-    // 4. Panel content: skipped below the fade-in threshold, alpha-scaled above
+    // 4. Mic-in-use dot: a standing indicator, not a HUD. It sits at the pill's
+    //    right edge, clear of the centred glyph, and fades with the same curve.
+    if state.mic_active && glyph_opacity > 0.0 {
+        let d = 6.0;
+        let x = fw - 10.0 - d;
+        let y = (fh - d) / 2.0;
+        scene.push(Node::RoundRect {
+            rect: put(fw, fh, Rect::new(x, y, d, d)),
+            radii: CornerRadii::uniform(d / 2.0),
+            fill: layout::fade(Rgba::rgb(0.95, 0.25, 0.25), glyph_opacity),
+        });
+    }
+
+    // 5. Panel content: skipped below the fade-in threshold, alpha-scaled above
     //    it, so it materializes instead of popping in at a fixed size.
     let content_opacity = layout::ease(
         (open - layout::CONTENT_FADE_IN_START) / (1.0 - layout::CONTENT_FADE_IN_START),
@@ -770,6 +785,16 @@ mod tests {
         // Live stream with unknown duration: no bar to pin at zero.
         v.media.duration = None;
         assert_eq!(all_nodes(&build(&v)).len(), 2);
+    }
+
+    #[test]
+    fn a_mic_dot_appears_in_the_pill_when_the_capture_endpoint_is_hot() {
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        assert_eq!(all_nodes(&build(&v)).len(), 2, "idle: body + glyph");
+        v.mic_active = true;
+        let f = build(&v);
+        // Body + glyph + the red dot at the right edge.
+        assert_eq!(all_nodes(&f).len(), 3, "{:#?}", f.scene.nodes);
     }
 
     #[test]

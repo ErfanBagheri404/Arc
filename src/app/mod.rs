@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
 use crate::services::media::Media;
+use crate::services::audio::{self, Audio};
 use crate::services::metrics::Sampler;
 use crate::services::power;
 use crate::ui;
@@ -29,6 +30,31 @@ const IDLE_POLL: Duration = Duration::from_millis(25);
 /// change notification worth wiring, and 500 ms is well inside the HUD's 3 s
 /// window, so a plug/unplug is never missed.
 const POWER_POLL: Duration = Duration::from_millis(500);
+
+/// Arm a volume HUD when the master volume or mute state *changes*. Same rule as
+/// the battery: the transition is the event, holding the key just extends it.
+/// Returns `true` when the layer was armed and a repaint is due.
+fn volume_hud(
+    a: &audio::AudioState,
+    last: &mut Option<(u8, bool)>,
+    now: Instant,
+    layer: &mut hud::HudLayer,
+) -> bool {
+    let (Some(percent), Some(muted)) = (a.volume, a.muted) else {
+        return false;
+    };
+    // First reading only announces a muted endpoint; a routine 30 % at startup
+    // is not news.
+    let show = match last.replace((percent, muted)) {
+        None => muted,
+        Some(prev) => prev != (percent, muted),
+    };
+    if !show {
+        return false;
+    }
+    layer.arm(hud::Hud::Volume { percent, muted }, now);
+    true
+}
 
 /// Arm a battery HUD when the power state *changes* to something worth showing.
 ///
@@ -98,6 +124,10 @@ pub fn run() -> std::process::ExitCode {
     let mut hud = hud::HudLayer::default();
     let mut last_power = Instant::now() - POWER_POLL;
     let mut last_power_state: Option<power::Power> = None;
+    // Audio (volume / mic) runs on its own worker thread — the COM pointer and
+    // 250 ms cadence live there, the app only reads the snapshot.
+    let audio = Audio::start();
+    let mut last_audio_state: Option<(u8, bool)> = None;
 
     let mut state = IslandState::collapsed();
     // The tab selection and hover persist across frames; everything else the UI
@@ -199,6 +229,18 @@ pub fn run() -> std::process::ExitCode {
                     redraw = true;
                 }
             }
+        }
+        // Audio: read the worker's snapshot every frame (a mutex read) and arm
+        // the volume HUD on change. The mic flag is not a HUD — it is a standing
+        // indicator, so it just rides on the view.
+        let a = audio.snapshot();
+        if a.mic_active != view.mic_active {
+            view.mic_active = a.mic_active;
+            redraw = true;
+        }
+        if volume_hud(&a, &mut last_audio_state, now, &mut hud) {
+            view.hud = hud.current();
+            redraw = true;
         }
 
         // Hover is polled, not event-driven (the collapsed window is
