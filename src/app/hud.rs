@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 /// How long a HUD stays up after it is armed (Atoll: 3 s for battery).
 pub const HUD_DURATION: Duration = Duration::from_secs(3);
+/// How long a countdown stays pinned between 1 Hz refreshes. Slack around the
+/// re-arm interval, so a slow frame never blanks the pill early.
+pub const TIMER_HUD_DURATION: Duration = Duration::from_millis(2_500);
 
 /// What the pill is currently showing instead of the idle dot.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +26,12 @@ pub enum Hud {
     Volume {
         percent: u8,
         muted: bool,
+    },
+    /// A running timer: the pill counts down and stays down until the run ends,
+    /// so this one has no expiry — a 15-minute timer cannot be hidden after 3 s.
+    Timer {
+        remaining: u32,
+        running: bool,
     },
 }
 
@@ -43,22 +52,39 @@ pub struct HudLayer {
 impl HudLayer {
     /// Show `hud`, or refresh its timer if the same HUD is already up (holding
     /// the volume key must not stack timers or flicker the panel).
+    ///
+    /// A timer HUD is pinned: it survives [`Self::step`] for as long as it runs.
     pub fn arm(&mut self, hud: Hud, now: Instant) {
-        if self.active.as_ref().is_none_or(|(cur, _)| *cur != hud) {
-            self.active = Some((hud, now + HUD_DURATION));
-        } else if let Some((_, until)) = self.active.as_mut() {
-            *until = now + HUD_DURATION;
+        match &hud {
+            Hud::Timer { .. } => {
+                self.active = Some((hud, now + TIMER_HUD_DURATION));
+            }
+            _ => {
+                if self.active.as_ref().is_none_or(|(cur, _)| *cur != hud) {
+                    self.active = Some((hud, now + HUD_DURATION));
+                } else if let Some((_, until)) = self.active.as_mut() {
+                    *until = now + HUD_DURATION;
+                }
+            }
         }
     }
 
     /// Drop the HUD once its timer expires. Returns `true` when it went away,
     /// so the caller knows a repaint is due.
     pub fn step(&mut self, now: Instant) -> bool {
-        if self.active.as_ref().is_some_and(|(_, until)| now >= *until) {
-            self.active = None;
-            return true;
+        match self.active.as_ref() {
+            // The app re-arms the countdown every second; if a whole second
+            // passed without one, the run ended and the pill goes back to idle.
+            Some((Hud::Timer { running: true, .. }, until)) if now >= *until => {
+                self.active = None;
+                true
+            }
+            Some((_, until)) if now >= *until => {
+                self.active = None;
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     pub fn current(&self) -> Option<Hud> {

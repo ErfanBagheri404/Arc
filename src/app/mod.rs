@@ -6,6 +6,7 @@
 
 pub mod hud;
 mod state;
+pub mod timer;
 
 pub use state::IslandState;
 
@@ -18,6 +19,69 @@ use crate::services::processes::Processes;
 use crate::services::metrics::Sampler;
 use crate::services::power;
 use crate::ui;
+use hud::Hud;
+use timer::{Timer, PRESETS};
+
+/// The wall clock for a countdown, in the app thread.
+struct Countdown {
+    /// Snapshot handed to the UI each frame.
+    view: Timer,
+    /// When the current second last rolled over.
+    last: Instant,
+    /// True between a preset click and the run reaching zero.
+    running: bool,
+}
+
+impl Countdown {
+    fn new(now: Instant) -> Self {
+        Self {
+            view: Timer::default(),
+            last: now,
+            running: false,
+        }
+    }
+
+    /// Start (or restart) a run from preset `index`.
+    fn start(&mut self, index: usize, now: Instant) {
+        let preset = index.min(PRESETS.len() - 1);
+        self.view = Timer {
+            remaining: PRESETS[preset],
+            preset,
+        };
+        self.last = now;
+        self.running = true;
+    }
+
+    /// Roll the countdown down. Returns `true` on the tick where the run hit
+    /// zero, so the caller fires exactly one notification.
+    fn step(&mut self, now: Instant) -> bool {
+        if !self.running {
+            return false;
+        }
+        if now.duration_since(self.last) < Duration::from_secs(1) {
+            return false;
+        }
+        self.last = now;
+        match self.view.remaining.checked_sub(1) {
+            Some(0) | None => {
+                self.view.remaining = 0;
+                self.running = false;
+                true
+            }
+            Some(left) => {
+                self.view.remaining = left;
+                false
+            }
+        }
+    }
+
+    /// Whether a preset click should start a fresh run: any click starts or
+    /// restarts, which is what a single "1 min" button must do.
+    fn click(&mut self, index: usize, now: Instant) -> bool {
+        self.start(index, now);
+        true
+    }
+}
 
 /// Nominal frame budget. Springs integrate against real elapsed time, so a slower
 /// display changes smoothness, not the motion curve.
@@ -131,6 +195,10 @@ pub fn run() -> std::process::ExitCode {
     let procs = Processes::start();
     let mut last_audio_state: Option<(u8, bool)> = None;
 
+    // Countdown: the app owns the clock, the UI only formats. Kept next to the
+    // island state because the run continues while the island is collapsed.
+    let mut timer = Countdown::new(Instant::now());
+
     let mut state = IslandState::collapsed();
     // The tab selection and hover persist across frames; everything else the UI
     // needs is derived from the size springs.
@@ -172,6 +240,11 @@ pub fn run() -> std::process::ExitCode {
                     if let Some(cmd) = view.media_command(lx, ly) {
                         media.send(cmd);
                         redraw = true;
+                    } else if let Some(preset) = view.timer_preset(lx, ly) {
+                        if timer.click(preset, Instant::now()) {
+                            view.timer = timer.view;
+                            redraw = true;
+                        }
                     } else if view.click_tab(lx, ly).is_some() {
                         redraw = true;
                     }
@@ -242,6 +315,31 @@ pub fn run() -> std::process::ExitCode {
             redraw = true;
         }
         if volume_hud(&a, &mut last_audio_state, now, &mut hud) {
+            view.hud = hud.current();
+            redraw = true;
+        }
+
+        // The countdown runs on its own clock: while one is up the pill shows
+        // it, so the frame is dirty every second regardless of hover or media.
+        if timer.view.remaining != view.timer.remaining || timer.view.preset != view.timer.preset
+        {
+            view.timer = timer.view;
+            redraw = true;
+        }
+        if timer.step(now) {
+            // Hit zero: tray balloon, then the pill returns to idle.
+            crate::platform::tray::notify("Timer", &format!("{} is up", view.timer.label()));
+            hud.arm(Hud::Timer { remaining: 0, running: false }, now);
+            view.hud = hud.current();
+            redraw = true;
+        } else if timer.running {
+            hud.arm(
+                Hud::Timer {
+                    remaining: timer.view.remaining,
+                    running: true,
+                },
+                now,
+            );
             view.hud = hud.current();
             redraw = true;
         }
