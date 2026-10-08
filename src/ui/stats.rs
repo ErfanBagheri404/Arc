@@ -41,14 +41,31 @@ struct Row<'a> {
     scale: f32,
 }
 
+/// Height of one top-process line.
+const PROC_H: f32 = 22.0;
+/// Gap between the metric rows and the process block.
+const PROC_GAP: f32 = 10.0;
+
 /// The Stats content block, laid out under `top` (the tab strip's bottom).
-pub fn content(fw: f32, fh: f32, top: f32, stats: &Stats) -> Vec<Node> {
+pub fn content(
+    fw: f32,
+    fh: f32,
+    top: f32,
+    stats: &Stats,
+    procs: &crate::services::processes::Snapshot,
+) -> Vec<Node> {
     let rows = rows(stats);
     let n = rows.len().max(1) as f32;
     // Four rows at the reference's 44 px plus gaps, scaled down to fit a
-    // half-open island rather than overflowing it.
+    // half-open island rather than overflowing it. The process block takes its
+    // share off the top first, so the list never pushes the metrics out.
     let avail = (fh - crate::ui::FOOTER_BOTTOM_PAD - top).max(0.0);
-    let full_h = n * ROW_H + (n - 1.0) * ROW_GAP;
+    let proc_h = if procs.rows.is_empty() {
+        0.0
+    } else {
+        procs.rows.len() as f32 * PROC_H + PROC_GAP
+    };
+    let full_h = n * ROW_H + (n - 1.0) * ROW_GAP + proc_h;
     if avail <= 0.0 || full_h <= 0.0 || fw <= crate::ui::PANEL_PAD * 2.0 {
         return Vec::new();
     }
@@ -101,6 +118,7 @@ pub fn content(fw: f32, fh: f32, top: f32, stats: &Stats) -> Vec<Node> {
             row.scale,
         ));
     }
+    out.extend(process_block(fw, fh, y0 + (h + gap) * n, procs, scale));
     out
 }
 
@@ -108,6 +126,55 @@ pub fn content(fw: f32, fh: f32, top: f32, stats: &Stats) -> Vec<Node> {
 const ROW_H: f32 = 44.0;
 /// Gap between metric rows.
 const ROW_GAP: f32 = 8.0;
+
+/// The top-process block: five `name — cpu%` lines. Nothing at all before the
+/// sampler's second tick, so the metrics keep the full height on first open.
+fn process_block(
+    fw: f32,
+    fh: f32,
+    y0: f32,
+    procs: &crate::services::processes::Snapshot,
+    scale: f32,
+) -> Vec<Node> {
+    let mut out = Vec::new();
+    let h = PROC_H * scale;
+    let gap = PROC_GAP * scale;
+    for (i, row) in procs.rows.iter().enumerate() {
+        let y = y0 + gap + (h + 0.0) * i as f32;
+        let style = TextStyle::subtitle(Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.55,
+        });
+        let lh = line_height(&style);
+        out.push(Node::Text {
+            rect: put(
+                fw,
+                fh,
+                Rect::new(crate::ui::PANEL_PAD + ROW_PAD, y + (h - lh) * 0.5, fw * 0.6, lh),
+            ),
+            text: row.name.clone(),
+            style,
+        });
+        let vs = TextStyle::numeric(11.0);
+        out.push(Node::Text {
+            rect: put(
+                fw,
+                fh,
+                Rect::new(
+                    fw - crate::ui::PANEL_PAD - ROW_PAD - VALUE_W,
+                    y + (h - line_height(&vs)) * 0.5,
+                    VALUE_W,
+                    line_height(&vs),
+                ),
+            ),
+            text: format!("{:.0} %", row.cpu_percent),
+            style: vs,
+        });
+    }
+    out
+}
 
 /// The four metric rows, in layout order.
 fn rows(stats: &Stats) -> Vec<Row<'_>> {

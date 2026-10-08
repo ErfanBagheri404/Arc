@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
 use crate::services::media::Media;
 use crate::services::audio::{self, Audio};
+use crate::services::processes::Processes;
 use crate::services::metrics::Sampler;
 use crate::services::power;
 use crate::ui;
@@ -127,6 +128,7 @@ pub fn run() -> std::process::ExitCode {
     // Audio (volume / mic) runs on its own worker thread — the COM pointer and
     // 250 ms cadence live there, the app only reads the snapshot.
     let audio = Audio::start();
+    let procs = Processes::start();
     let mut last_audio_state: Option<(u8, bool)> = None;
 
     let mut state = IslandState::collapsed();
@@ -234,6 +236,7 @@ pub fn run() -> std::process::ExitCode {
         // the volume HUD on change. The mic flag is not a HUD — it is a standing
         // indicator, so it just rides on the view.
         let a = audio.snapshot();
+        view.procs = procs.snapshot();
         if a.mic_active != view.mic_active {
             view.mic_active = a.mic_active;
             redraw = true;

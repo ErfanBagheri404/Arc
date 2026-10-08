@@ -127,6 +127,8 @@ pub struct ViewState {
     pub hud: Option<crate::app::hud::Hud>,
     /// The capture endpoint is seeing audio: a standing red dot in the pill.
     pub mic_active: bool,
+    /// Top processes by CPU, from the process sampler.
+    pub procs: crate::services::processes::Snapshot,
 }
 
 impl ViewState {
@@ -371,7 +373,7 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
     if state.active_tab == MEDIA_TAB {
         out.extend(media::content(fw, fh, tab_bottom, &state.media));
     } else if state.active_tab == STATS_TAB {
-        out.extend(stats::content(fw, fh, tab_bottom, &state.stats));
+        out.extend(stats::content(fw, fh, tab_bottom, &state.stats, &state.procs));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
