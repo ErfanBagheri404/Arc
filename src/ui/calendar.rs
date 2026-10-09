@@ -76,16 +76,6 @@ fn head_rects(fw: f32, top: f32, subs: usize) -> Vec<Rect> {
     out
 }
 
-/// The add-calendar row's rect — row `0` of [`head_rects`].
-pub fn add_rect(fw: f32, top: f32) -> Rect {
-    head_rects(fw, top, 0)[0]
-}
-
-/// Subscription row `i`'s rect — row `i + 1` of [`head_rects`].
-pub fn sub_rect(fw: f32, top: f32, i: usize) -> Rect {
-    head_rects(fw, top, i + 1)[i + 1]
-}
-
 /// Top of the event list, below every control.
 fn events_top(top: f32, subs: usize) -> f32 {
     top + TOP_PAD + (ROW_H + ROW_GAP) * (subs as f32 + 1.0)
@@ -245,7 +235,7 @@ mod tests {
         let nodes = content(400.0, 400.0, 0.0, &Snapshot::default());
         // add track + add label + empty-state text
         assert_eq!(nodes.len(), 3);
-        let a = add_rect(400.0, 0.0);
+        let a = head_rects(400.0, 0.0, 0)[0];
         assert_eq!(head_hit(400.0, 0.0, 0, a.x + 2.0, a.y + 2.0), Some(0));
     }
 
@@ -253,9 +243,9 @@ mod tests {
     fn a_click_on_a_sub_row_names_that_sub_not_add() {
         // The controls are positional: geometry, not the sub contents,
         // decides the hit.
-        let r = sub_rect(400.0, 0.0, 1);
+        let r = head_rects(400.0, 0.0, 2)[2];
         assert_eq!(head_hit(400.0, 0.0, 2, r.x + 2.0, r.y + 2.0), Some(2));
-        let a = add_rect(400.0, 0.0);
+        let a = head_rects(400.0, 0.0, 0)[0];
         assert_eq!(head_hit(400.0, 0.0, 2, a.x + 2.0, a.y + 2.0), Some(0));
     }
 
@@ -283,7 +273,7 @@ mod tests {
     #[test]
     fn events_start_below_every_control() {
         // One sub means one sub row; the event list starts after it.
-        assert!(rows(400.0, events_top(0.0, 1), 1)[0].y > sub_rect(400.0, 0.0, 0).max_y());
+        assert!(rows(400.0, events_top(0.0, 1), 1)[0].y > head_rects(400.0, 0.0, 1)[1].max_y());
     }
 
     #[test]
@@ -312,7 +302,7 @@ mod tests {
         // and routing cannot disagree on which sub a click unsubscribes.
         let subs = MAX_SUBS + 3;
         for i in 0..subs {
-            let r = sub_rect(400.0, 0.0, i);
+            let r = head_rects(400.0, 0.0, subs)[i + 1];
             let hit = head_hit(400.0, 0.0, subs.min(MAX_SUBS), r.x + 2.0, r.y + 2.0);
             assert_eq!(hit, (i < MAX_SUBS).then_some(i + 1));
         }
