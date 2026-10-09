@@ -8,6 +8,7 @@ pub mod picker;
 pub mod settings;
 pub mod weather;
 pub mod calendar;
+pub mod downloads;
 pub mod calendars;
 pub mod media;
 pub mod metrics;
