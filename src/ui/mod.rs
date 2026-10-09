@@ -146,6 +146,8 @@ pub struct ViewState {
     pub weather: Option<crate::services::weather::Snapshot>,
     /// Upcoming calendar events, soonest first.
     pub cal_events: Vec<crate::services::calendar::Event>,
+    /// Downloads folder size-delta, from the beta watcher.
+    pub downloads: crate::services::downloads::Snapshot,
 }
 
 impl ViewState {
@@ -383,6 +385,32 @@ pub fn build(state: &ViewState) -> Frame {
                 },
             });
         }
+    }
+
+    // 4c. Downloads: a standing pill row right of the weather one, shown only
+    //     while the folder is actually growing. The size-delta heuristic is
+    //     beta, so the label carries that word rather than pretending to know.
+    if state.downloads.delta > 0 && state.hud.is_none() && glyph_opacity > 0.0 {
+        let style = TextStyle::numeric(11.0);
+        let text = state.downloads.label();
+        let tw = measure(&text, &style);
+        let th = line_height(&style);
+        let h = (fh - 10.0).max(4.0);
+        let x = 10.0 + state.weather.as_ref().map_or(0.0, |w| measure(&w.label(), &style) + 14.0) + 6.0;
+        let track = Rect::new(x, (fh - h) / 2.0, (tw + 14.0).min(fw * 0.5), h);
+        scene.push(Node::RoundRect {
+            rect: put(fw, fh, track),
+            radii: CornerRadii::uniform(track.h / 2.0),
+            fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), glyph_opacity),
+        });
+        scene.push(Node::Text {
+            rect: put(fw, fh, Rect::new(track.x + 7.0, (fh - th) / 2.0, tw, th)),
+            text,
+            style: TextStyle {
+                color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.92), glyph_opacity),
+                ..style
+            },
+        });
     }
 
     // 5. Panel content: skipped below the fade-in threshold, alpha-scaled above

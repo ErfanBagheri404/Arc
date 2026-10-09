@@ -18,6 +18,7 @@ use crate::services::audio::{self, Audio};
 use crate::services::clipboard::Clipboard;
 use crate::services::picker::Picker;
 use crate::services::calendars::Calendar;
+use crate::services::downloads::Downloads;
 use crate::services::weather::Weather;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -203,6 +204,7 @@ pub fn run() -> std::process::ExitCode {
     let picker = Picker::new();
     let weather = Weather::new();
     let cals = Calendar::new();
+    let downloads = Downloads::new();
     let mut last_audio_state: Option<(u8, bool)> = None;
 
     // Countdown: the app owns the clock, the UI only formats. Kept next to the
@@ -368,6 +370,11 @@ pub fn run() -> std::process::ExitCode {
         let cal_events = cals.snapshot().events;
         if cal_events != view.cal_events {
             view.cal_events = cal_events;
+            redraw = true;
+        }
+        let dl = downloads.snapshot();
+        if dl != view.downloads {
+            view.downloads = dl;
             redraw = true;
         }
         if a.mic_active != view.mic_active {
