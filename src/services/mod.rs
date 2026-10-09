@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod clipboard;
 pub mod picker;
+pub mod settings;
 pub mod media;
 pub mod metrics;
 pub mod processes;
