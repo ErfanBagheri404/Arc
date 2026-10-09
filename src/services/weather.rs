@@ -27,21 +27,6 @@ impl Snapshot {
     }
 }
 
-/// WMO weather codes → short icon glyphs. Only the common buckets; anything
-/// else falls back to `?`.
-pub fn glyph(code: u32) -> &'static str {
-    match code {
-        0 => "Sunny",
-        1..=2 => "Partly cloudy",
-        3 => "Cloudy",
-        45 | 48 => "Fog",
-        51..=67 | 80..=82 => "Rain",
-        71..=77 | 85 | 86 => "Snow",
-        95..=99 => "Storm",
-        _ => "—",
-    }
-}
-
 pub struct Weather {
     shared: Arc<Mutex<Option<Snapshot>>>,
     alive: Arc<AtomicBool>,
@@ -180,14 +165,6 @@ mod tests {
             },
         };
         assert_eq!(s.label(), "Tehran 24°");
-    }
-
-    #[test]
-    fn glyphs_cover_the_common_codes() {
-        assert_eq!(glyph(0), "Sunny");
-        assert_eq!(glyph(61), "Rain");
-        assert_eq!(glyph(95), "Storm");
-        assert_eq!(glyph(9999), "—");
     }
 
     #[test]
