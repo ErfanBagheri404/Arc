@@ -40,6 +40,10 @@ pub enum Event {
         width: u32,
         height: u32,
     },
+    /// Files dropped onto the island (from `DragAcceptFiles`).
+    FilesDropped {
+        paths: Vec<String>,
+    },
     /// Foreground window became fullscreen on our monitor → hide.
     FullscreenEnter,
     FullscreenExit,

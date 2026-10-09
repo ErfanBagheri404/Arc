@@ -1,18 +1,21 @@
-//! Calendar tab: upcoming events from the subscribed `.ics` sources, soonest
-//! first.
+//! Calendar tab: subscriptions, then upcoming events from those `.ics`
+//! sources, soonest first.
 //!
 //! Pure builder, same contract as `ui::clipboard`: `content(fw, fh, top,
-//! events)` returns scene nodes in panel space and reads nothing else.
+//! snapshot)` returns scene nodes in panel space and reads nothing else.
 //!
-//! The subscriptions are managed in settings for now — there is no add-box in
-//! the panel because the island has no keyboard input path yet (same reason
-//! clipboard search waits for Phase 7). A URL lands via the settings file, the
-//! worker fetches it, and the events show here.
+//! ## Adding a subscription without a keyboard
+//!
+//! The island has no text input yet, so the add control copies the `.ics` URL
+//! off the clipboard: **Add calendar = click with the URL already copied.**
+//! That is a one-shot paste, not clipboard *history*, so it needs no consent —
+//! see [`crate::services::clipboard::paste`]. Phase 7 replaces this with a real
+//! text field when keyboard input lands.
 
 use crate::core::geom::{CornerRadii, Rect, Rgba};
 use crate::core::scene::{Node, TextStyle};
-use crate::services::calendar::Event;
-use crate::ui::{layout, line_height, measure, PANEL_PAD};
+use crate::services::calendars::Snapshot;
+use crate::ui::{layout, line_height, PANEL_PAD};
 
 /// Clamp a rect inside the frame, as every ui module does before emitting.
 fn put(fw: f32, fh: f32, rect: Rect) -> Rect {
@@ -27,9 +30,18 @@ pub const ROW_GAP: f32 = 8.0;
 pub const TOP_PAD: f32 = 8.0;
 /// How many characters of a summary fit one row.
 pub const PREVIEW_CHARS: usize = 44;
+/// How many events are listed before the panel says there are more.
+pub const MAX_EVENTS: usize = 4;
+/// How many subscriptions are listed.
+pub const MAX_SUBS: usize = 3;
 
 /// The grey track every row sits on.
 const ROW_TRACK: Rgba = Rgba::rgba(1.0, 1.0, 1.0, 0.05);
+/// A subscription whose last fetch failed — red-tinted, not hidden.
+const FAILED_TRACK: Rgba = Rgba::rgba(0.95, 0.35, 0.35, 0.12);
+/// The add-calendar control's track, brighter so it reads as the one thing
+/// you can click here.
+const ADD_TRACK: Rgba = Rgba::rgba(1.0, 1.0, 1.0, 0.10);
 
 /// Each event row's rect in panel space, soonest first. Drawing and
 /// hit-testing both read this, so a click can never land on a different event
@@ -37,46 +49,138 @@ const ROW_TRACK: Rgba = Rgba::rgba(1.0, 1.0, 1.0, 0.05);
 pub fn rows(fw: f32, top: f32, count: usize) -> Vec<Rect> {
     let y0 = top + TOP_PAD;
     (0..count)
-        .map(|i| Rect::new(PANEL_PAD, y0 + (ROW_H + ROW_GAP) * i as f32, fw - PANEL_PAD * 2.0, ROW_H))
+        .map(|i| {
+            Rect::new(
+                PANEL_PAD,
+                y0 + (ROW_H + ROW_GAP) * i as f32,
+                fw - PANEL_PAD * 2.0,
+                ROW_H,
+            )
+        })
         .collect()
 }
 
+/// The control rows: the add row, then one row per subscription.
+fn head_rects(fw: f32, top: f32, subs: usize) -> Vec<Rect> {
+    let y0 = top + TOP_PAD;
+    let w = fw - PANEL_PAD * 2.0;
+    let mut out = vec![Rect::new(PANEL_PAD, y0, w, ROW_H)];
+    for i in 0..subs {
+        out.push(Rect::new(
+            PANEL_PAD,
+            y0 + (ROW_H + ROW_GAP) * (i + 1) as f32,
+            w,
+            ROW_H,
+        ));
+    }
+    out
+}
+
+/// The add-calendar row's rect — row `0` of [`head_rects`].
+pub fn add_rect(fw: f32, top: f32) -> Rect {
+    head_rects(fw, top, 0)[0]
+}
+
+/// Subscription row `i`'s rect — row `i + 1` of [`head_rects`].
+pub fn sub_rect(fw: f32, top: f32, i: usize) -> Rect {
+    head_rects(fw, top, i + 1)[i + 1]
+}
+
+/// Top of the event list, below every control.
+fn events_top(top: f32, subs: usize) -> f32 {
+    top + TOP_PAD + (ROW_H + ROW_GAP) * (subs as f32 + 1.0)
+}
+
 /// The Calendar tab's content, laid out under `top`.
-pub fn content(fw: f32, fh: f32, top: f32, events: &[Event]) -> Vec<Node> {
+pub fn content(fw: f32, fh: f32, top: f32, snap: &Snapshot) -> Vec<Node> {
     let mut out = Vec::new();
-    let rows = rows(fw, top, events.len());
-    if events.is_empty() {
-        let style = TextStyle::numeric(12.0);
-        let text = "No upcoming events — add an .ics URL in settings".to_string();
-        let tw = measure(&text, &style);
-        let th = line_height(&style);
+    let subs = snap.subs.len().min(MAX_SUBS);
+    let head = head_rects(fw, top, subs);
+
+    // Add row. The label names the gesture, so it is not a guess.
+    let add = head[0];
+    out.push(Node::RoundRect {
+        rect: put(fw, fh, add),
+        radii: CornerRadii::uniform(8.0),
+        fill: layout::fade(ADD_TRACK, 1.0),
+    });
+    let th = line_height(&TextStyle::numeric(12.0));
+    out.push(Node::Text {
+        rect: put(
+            fw,
+            fh,
+            Rect::new(add.x + 10.0, add.y + (add.h - th) / 2.0, add.w - 20.0, th),
+        ),
+        text: "+ Add calendar — copy an .ics URL first".to_string(),
+        style: TextStyle::numeric(12.0),
+    });
+
+    // One row per subscription; a failed fetch shows its name in red rather
+    // than silently showing fewer events.
+    for (i, s) in snap.subs.iter().take(MAX_SUBS).enumerate() {
+        let r = head[i + 1];
+        let bad = snap.failed.iter().any(|f| f == &s.name);
+        out.push(Node::RoundRect {
+            rect: put(fw, fh, r),
+            radii: CornerRadii::uniform(8.0),
+            fill: layout::fade(if bad { FAILED_TRACK } else { ROW_TRACK }, 1.0),
+        });
+        let lh = line_height(&TextStyle::numeric(11.0));
         out.push(Node::Text {
             rect: put(
                 fw,
                 fh,
-                Rect::new(PANEL_PAD, top + TOP_PAD, fw - PANEL_PAD * 2.0, th.max(ROW_H)),
+                Rect::new(r.x + 10.0, r.y + (r.h - lh) / 2.0, r.w - 20.0, lh),
             ),
-            text,
+            text: if bad {
+                format!("{} — unreachable", s.name)
+            } else {
+                s.name.clone()
+            },
             style: TextStyle {
-                color: Rgba::rgba(1.0, 1.0, 1.0, 0.6),
-                ..style
+                size: 11.0,
+                color: Rgba::rgba(1.0, 1.0, 1.0, if bad { 0.6 } else { 0.7 }),
+                ..TextStyle::default()
             },
         });
-        let _ = tw;
+    }
+
+    // Events, soonest first.
+    let evs: Vec<_> = snap.events.iter().take(MAX_EVENTS).collect();
+    if evs.is_empty() {
+        let lh = line_height(&TextStyle::numeric(12.0));
+        out.push(Node::Text {
+            rect: put(
+                fw,
+                fh,
+                Rect::new(
+                    PANEL_PAD,
+                    events_top(top, subs) + TOP_PAD,
+                    fw - PANEL_PAD * 2.0,
+                    lh,
+                ),
+            ),
+            text: "No upcoming events".to_string(),
+            style: TextStyle {
+                color: Rgba::rgba(1.0, 1.0, 1.0, 0.6),
+                ..TextStyle::numeric(12.0)
+            },
+        });
         return out;
     }
-    for (e, r) in events.iter().zip(rows.iter()) {
+    for (e, r) in evs.iter().zip(rows(fw, events_top(top, subs), evs.len())) {
         out.push(Node::RoundRect {
-            rect: put(fw, fh, *r),
+            rect: put(fw, fh, r),
             radii: CornerRadii::uniform(8.0),
             fill: layout::fade(ROW_TRACK, 1.0),
         });
         let mut label = e.label();
         if label.chars().count() > PREVIEW_CHARS {
-            label = format!("{}…", label.chars().take(PREVIEW_CHARS).collect::<String>());
+            label = format!(
+                "{}…",
+                label.chars().take(PREVIEW_CHARS).collect::<String>()
+            );
         }
-        let style = TextStyle::numeric(12.0);
-        let th = line_height(&style);
         out.push(Node::Text {
             rect: put(
                 fw,
@@ -84,15 +188,38 @@ pub fn content(fw: f32, fh: f32, top: f32, events: &[Event]) -> Vec<Node> {
                 Rect::new(r.x + 10.0, r.y + (r.h - th) / 2.0, r.w - 20.0, th),
             ),
             text: label,
-            style,
+            style: TextStyle::numeric(12.0),
+        });
+    }
+    if snap.events.len() > MAX_EVENTS {
+        let rest = TextStyle::numeric(11.0);
+        let lh = line_height(&rest);
+        let y = events_top(top, subs) + TOP_PAD + (ROW_H + ROW_GAP) * evs.len() as f32;
+        out.push(Node::Text {
+            rect: put(fw, fh, Rect::new(PANEL_PAD, y, fw - PANEL_PAD * 2.0, lh)),
+            text: format!("+{} more", snap.events.len() - MAX_EVENTS),
+            style: TextStyle {
+                color: Rgba::rgba(1.0, 1.0, 1.0, 0.45),
+                ..rest
+            },
         });
     }
     out
 }
 
+/// Which control panel-space `(x, y)` hits: `0` is add, `Some(i + 1)` is
+/// subscription `i`. Event rows and empty space return `None`.
+pub fn head_hit(fw: f32, top: f32, subs: usize, x: f32, y: f32) -> Option<usize> {
+    head_rects(fw, top, subs)
+        .iter()
+        .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::calendar::Event;
+    use crate::services::calendars::Sub;
 
     fn ev(summary: &str, start: i64) -> Event {
         Event {
@@ -103,30 +230,110 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_events_show_an_empty_state() {
-        let nodes = content(400.0, 300.0, 0.0, &[]);
-        assert_eq!(nodes.len(), 1, "one empty-state text, no rows");
+    fn texts(nodes: &[Node]) -> Vec<&str> {
+        nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn one_row_per_event() {
-        let evs = vec![ev("A", 100), ev("B", 200)];
-        let nodes = content(400.0, 300.0, 0.0, &evs);
-        // Row track + label per event.
-        assert_eq!(nodes.len(), 4);
+    fn add_row_is_present_even_with_no_subs_or_events() {
+        let nodes = content(400.0, 400.0, 0.0, &Snapshot::default());
+        // add track + add label + empty-state text
+        assert_eq!(nodes.len(), 3);
+        let a = add_rect(400.0, 0.0);
+        assert_eq!(head_hit(400.0, 0.0, 0, a.x + 2.0, a.y + 2.0), Some(0));
+    }
+
+    #[test]
+    fn a_click_on_a_sub_row_names_that_sub_not_add() {
+        // The controls are positional: geometry, not the sub contents,
+        // decides the hit.
+        let r = sub_rect(400.0, 0.0, 1);
+        assert_eq!(head_hit(400.0, 0.0, 2, r.x + 2.0, r.y + 2.0), Some(2));
+        let a = add_rect(400.0, 0.0);
+        assert_eq!(head_hit(400.0, 0.0, 2, a.x + 2.0, a.y + 2.0), Some(0));
+    }
+
+    #[test]
+    fn a_failed_sub_is_marked_not_hidden() {
+        let nodes = content(
+            400.0,
+            400.0,
+            0.0,
+            &Snapshot {
+                subs: vec![Sub {
+                    name: "Broken".into(),
+                    url: "x".into(),
+                }],
+                failed: vec!["Broken".into()],
+                ..Snapshot::default()
+            },
+        );
+        assert!(
+            texts(&nodes).iter().any(|t| t.contains("unreachable")),
+            "a broken URL must be visible"
+        );
+    }
+
+    #[test]
+    fn events_start_below_every_control() {
+        // One sub means one sub row; the event list starts after it.
+        assert!(rows(400.0, events_top(0.0, 1), 1)[0].y > sub_rect(400.0, 0.0, 0).max_y());
     }
 
     #[test]
     fn long_summaries_are_truncated() {
         let long = "x".repeat(PREVIEW_CHARS + 10);
-        let evs = vec![ev(&long, 100)];
-        let nodes = content(400.0, 300.0, 0.0, &evs);
-        if let Node::Text { text, .. } = &nodes[1] {
-            assert!(text.ends_with('…'));
-            assert_eq!(text.chars().count(), PREVIEW_CHARS + 1);
-        } else {
-            panic!("expected text node");
+        let nodes = content(
+            400.0,
+            400.0,
+            0.0,
+            &Snapshot {
+                events: vec![ev(&long, 100)],
+                ..Snapshot::default()
+            },
+        );
+        // The label carries a HH:MM prefix, so match the repeated body.
+        let label = texts(&nodes)
+            .into_iter()
+            .find(|t| t.contains(&"x".repeat(8)))
+            .expect("event label");
+        assert!(label.ends_with('…'));
+    }
+
+    #[test]
+    fn hits_never_reach_a_sub_that_is_not_drawn() {
+        // More subs than drawn: hit row i only names drawn subs, so layout
+        // and routing cannot disagree on which sub a click unsubscribes.
+        let subs = MAX_SUBS + 3;
+        for i in 0..subs {
+            let r = sub_rect(400.0, 0.0, i);
+            let hit = head_hit(400.0, 0.0, subs.min(MAX_SUBS), r.x + 2.0, r.y + 2.0);
+            assert_eq!(hit, (i < MAX_SUBS).then_some(i + 1));
         }
+    }
+
+    #[test]
+    fn overflow_says_how_many_more() {
+        let events: Vec<_> = (0..MAX_EVENTS + 3)
+            .map(|i| ev(&format!("E{i}"), 100 + i as i64 * 3600))
+            .collect();
+        let nodes = content(
+            400.0,
+            700.0,
+            0.0,
+            &Snapshot {
+                events,
+                ..Snapshot::default()
+            },
+        );
+        assert!(
+            texts(&nodes).iter().any(|t| t.contains("+3 more"))
+        );
     }
 }

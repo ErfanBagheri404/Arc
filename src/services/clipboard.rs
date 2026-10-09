@@ -243,6 +243,14 @@ fn sequence() -> u32 {
 
 /// Read `CF_UNICODETEXT`, or `None` for any other format (an image, a file
 /// drop) or a clipboard another process is holding.
+/// Read the clipboard's text right now, ignoring capture consent.
+///
+/// Consent governs *history*, not reading: a click that consumes the clipboard
+/// is an explicit user action, so it needs no opt-in.
+pub fn paste() -> Option<String> {
+    read_text()
+}
+
 fn read_text() -> Option<String> {
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 

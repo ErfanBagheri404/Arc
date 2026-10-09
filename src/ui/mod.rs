@@ -23,6 +23,7 @@ use crate::core::scene::{Align, Frame, Node, Scene, TextStyle, Weight};
 use crate::ui::layout::{island_radius, openness};
 
 pub mod calendar;
+pub mod shelf;
 pub mod clipboard;
 pub mod layout;
 pub mod picker;
@@ -37,7 +38,9 @@ pub use text::{line_height, measure};
 pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
-pub const TABS: [&str; 7] = ["Media", "Stats", "Timer", "Clipboard", "Color", "Usage", "Calendar"];
+pub const TABS: [&str; 8] = [
+    "Media", "Stats", "Timer", "Clipboard", "Color", "Usage", "Calendar", "Shelf",
+];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
 pub const CONTENT_ROWS: usize = 3;
@@ -145,9 +148,13 @@ pub struct ViewState {
     /// row, not a HUD: it does not expire.
     pub weather: Option<crate::services::weather::Snapshot>,
     /// Upcoming calendar events, soonest first.
-    pub cal_events: Vec<crate::services::calendar::Event>,
+
     /// Downloads folder size-delta, from the beta watcher.
     pub downloads: crate::services::downloads::Snapshot,
+    /// Pinned shelf items, owned by the shelf service.
+    pub shelf: Vec<crate::services::shelf::Item>,
+    /// Calendar subscriptions plus upcoming events.
+    pub cal: crate::services::calendars::Snapshot,
 }
 
 impl ViewState {
@@ -231,6 +238,32 @@ impl ViewState {
             .into_iter()
             .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
             .map(|i| i + 1)
+    }
+
+    /// Which calendar control panel-space `(x, y)` hits: `0` is the add row,
+    /// `Some(i + 1)` is subscription `i`.
+    pub fn calendar_hit(&self, x: f32, y: f32) -> Option<usize> {
+        if self.active_tab != CALENDAR_TAB || !self.content_visible() {
+            return None;
+        }
+        calendar::head_hit(
+            self.island_width,
+            row_band_top(),
+            self.cal.subs.len().min(calendar::MAX_SUBS),
+            x,
+            y,
+        )
+    }
+
+    /// Which shelf tile panel-space `(x, y)` hits, if any.
+    ///
+    /// Only on the Shelf tab while the panel is open: the pill in collapsed
+    /// mode is a status readout, not a click target.
+    pub fn shelf_hit(&self, x: f32, y: f32) -> Option<usize> {
+        if self.active_tab != SHELF_TAB || !self.content_visible() {
+            return None;
+        }
+        shelf::tile_at(self.island_width, row_band_top(), &self.shelf, x, y)
     }
 
     /// Which color-picker control panel-space `(x, y)` hits: `0` is the
@@ -356,61 +389,42 @@ pub fn build(state: &ViewState) -> Frame {
         });
     }
 
-    // 4b. Weather: a standing pill row at the left edge, mirroring the mic
-    //     dot at the right. Skipped when a HUD owns the glyph slot or the panel
-    //     is open, so the pill never crowds itself.
-    if let Some(w) = state.weather.as_ref() {
-        if state.hud.is_none() && glyph_opacity > 0.0 {
-            let style = TextStyle::numeric(11.0);
-            let text = w.label();
+    // 4b. Standing pill rows: weather, downloads, shelf. Each is a small
+    //     rounded track with a label, laid out left-to-right in that order.
+    //     Skipped when a HUD owns the glyph slot or the panel is open. Order
+    //     is fixed so rows never jump around as data arrives.
+    if state.hud.is_none() && glyph_opacity > 0.0 {
+        let style = TextStyle::numeric(11.0);
+        let th = line_height(&style);
+        let h = (fh - 10.0).max(4.0);
+        let mut x = 10.0f32;
+        let rows: Vec<String> = state
+            .weather
+            .as_ref()
+            .map(|w| w.label())
+            .into_iter()
+            .chain((state.downloads.delta > 0).then(|| state.downloads.label()))
+            .chain((!state.shelf.is_empty()).then(|| format!("Shelf {} items", state.shelf.len())))
+            .collect();
+        for text in rows {
             let tw = measure(&text, &style);
-            let th = line_height(&style);
-            let h = (fh - 10.0).max(4.0);
-            let track = Rect::new(10.0, (fh - h) / 2.0, (tw + 14.0).min(fw * 0.5), h);
+            let w = (tw + 14.0).min(fw * 0.5);
+            let track = Rect::new(x, (fh - h) / 2.0, w, h);
             scene.push(Node::RoundRect {
                 rect: put(fw, fh, track),
                 radii: CornerRadii::uniform(track.h / 2.0),
                 fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), glyph_opacity),
             });
             scene.push(Node::Text {
-                rect: put(
-                    fw,
-                    fh,
-                    Rect::new(track.x + 7.0, (fh - th) / 2.0, tw, th),
-                ),
+                rect: put(fw, fh, Rect::new(track.x + 7.0, (fh - th) / 2.0, tw, th)),
                 text,
                 style: TextStyle {
                     color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.92), glyph_opacity),
                     ..style
                 },
             });
+            x += w + 6.0;
         }
-    }
-
-    // 4c. Downloads: a standing pill row right of the weather one, shown only
-    //     while the folder is actually growing. The size-delta heuristic is
-    //     beta, so the label carries that word rather than pretending to know.
-    if state.downloads.delta > 0 && state.hud.is_none() && glyph_opacity > 0.0 {
-        let style = TextStyle::numeric(11.0);
-        let text = state.downloads.label();
-        let tw = measure(&text, &style);
-        let th = line_height(&style);
-        let h = (fh - 10.0).max(4.0);
-        let x = 10.0 + state.weather.as_ref().map_or(0.0, |w| measure(&w.label(), &style) + 14.0) + 6.0;
-        let track = Rect::new(x, (fh - h) / 2.0, (tw + 14.0).min(fw * 0.5), h);
-        scene.push(Node::RoundRect {
-            rect: put(fw, fh, track),
-            radii: CornerRadii::uniform(track.h / 2.0),
-            fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), glyph_opacity),
-        });
-        scene.push(Node::Text {
-            rect: put(fw, fh, Rect::new(track.x + 7.0, (fh - th) / 2.0, tw, th)),
-            text,
-            style: TextStyle {
-                color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.92), glyph_opacity),
-                ..style
-            },
-        });
     }
 
     // 5. Panel content: skipped below the fade-in threshold, alpha-scaled above
@@ -510,7 +524,9 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
     } else if state.active_tab == PICKER_TAB {
         out.extend(picker::content(fw, fh, tab_bottom, &state.picker));
     } else if state.active_tab == CALENDAR_TAB {
-        out.extend(calendar::content(fw, fh, tab_bottom, &state.cal_events));
+        out.extend(calendar::content(fw, fh, tab_bottom, &state.cal));
+    } else if state.active_tab == SHELF_TAB {
+        out.extend(shelf::content(fw, fh, tab_bottom, &state.shelf));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -528,6 +544,8 @@ pub const CLIPBOARD_TAB: usize = 3;
 pub const PICKER_TAB: usize = 4;
 /// The Calendar tab — upcoming events from subscribed `.ics` sources.
 pub const CALENDAR_TAB: usize = 6;
+/// The Shelf tab — pinned files dropped on the island.
+pub const SHELF_TAB: usize = 7;
 /// The Usage tab — still the generic placeholder rows.
 pub const USAGE_TAB: usize = 5;
 
@@ -1300,10 +1318,10 @@ mod tests {
     }
 
     #[test]
-    fn panel_frame_contains_seven_tabs_with_8px_gaps() {
+    fn panel_frame_contains_eight_tabs_with_8px_gaps() {
         let f = panel();
         let rects = glyph_rects(&f);
-        assert_eq!(rects.len(), 7, "expected seven tabs: {:#?}", f.scene.nodes);
+        assert_eq!(rects.len(), 8, "expected eight tabs: {:#?}", f.scene.nodes);
         for w in rects.windows(2) {
             assert!(w[0].max_x() <= w[1].x + 1e-4, "tabs overlap: {w:?}");
             assert!(
