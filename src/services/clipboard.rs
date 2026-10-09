@@ -79,21 +79,24 @@ struct Store {
     entries: Vec<Entry>,
 }
 
-impl Store {
-    /// The history as a bare entry list, for the shared settings store.
-    fn entries(&self) -> &[Entry] {
-        &self.entries
-    }
-}
-
-impl From<Vec<Entry>> for Store {
-    fn from(entries: Vec<Entry>) -> Self {
-        Self {
-            // The shared store has no consent column; a non-empty history
-            // implies the user opted in at some point.
-            enabled: !entries.is_empty(),
-            entries,
-        }
+impl From<toml::Table> for Store {
+    fn from(t: toml::Table) -> Self {
+        let enabled = super::settings::get_bool(&t, "clip_enabled", false);
+        let entries = match t.get("entries").and_then(|v| v.as_array()) {
+            Some(list) => list
+                .iter()
+                .filter_map(|v| {
+                    let e = v.as_table()?;
+                    Some(Entry {
+                        text: e.get("text")?.as_str()?.to_string(),
+                        at: e.get("at")?.as_integer()? as u64,
+                        kind: 'e',
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        Self { enabled, entries }
     }
 }
 
@@ -325,11 +328,13 @@ fn unix_now() -> u64 {
 }
 
 fn load() -> Store {
-    super::settings::load_clipboard().into()
+    super::settings::load().into()
 }
 
 fn save(store: &Store) -> std::io::Result<()> {
-    super::settings::save_clipboard(store.entries());
+    let mut t = super::settings::load();
+    super::settings::set_bool(&mut t, "clip_enabled", store.enabled);
+    super::settings::save(&t);
     Ok(())
 }
 

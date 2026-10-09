@@ -140,6 +140,9 @@ pub struct ViewState {
     pub clip_enabled: bool,
     /// The color picker's sample and trail, owned by the picker service.
     pub picker: crate::services::picker::Picker,
+    /// Latest weather, or `None` until the first fetch lands. A standing pill
+    /// row, not a HUD: it does not expire.
+    pub weather: Option<crate::services::weather::Snapshot>,
 }
 
 impl ViewState {
@@ -346,6 +349,37 @@ pub fn build(state: &ViewState) -> Frame {
             radii: CornerRadii::uniform(d / 2.0),
             fill: layout::fade(Rgba::rgb(0.95, 0.25, 0.25), glyph_opacity),
         });
+    }
+
+    // 4b. Weather: a standing pill row at the left edge, mirroring the mic
+    //     dot at the right. Skipped when a HUD owns the glyph slot or the panel
+    //     is open, so the pill never crowds itself.
+    if let Some(w) = state.weather.as_ref() {
+        if state.hud.is_none() && glyph_opacity > 0.0 {
+            let style = TextStyle::numeric(11.0);
+            let text = w.label();
+            let tw = measure(&text, &style);
+            let th = line_height(&style);
+            let h = (fh - 10.0).max(4.0);
+            let track = Rect::new(10.0, (fh - h) / 2.0, (tw + 14.0).min(fw * 0.5), h);
+            scene.push(Node::RoundRect {
+                rect: put(fw, fh, track),
+                radii: CornerRadii::uniform(track.h / 2.0),
+                fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), glyph_opacity),
+            });
+            scene.push(Node::Text {
+                rect: put(
+                    fw,
+                    fh,
+                    Rect::new(track.x + 7.0, (fh - th) / 2.0, tw, th),
+                ),
+                text,
+                style: TextStyle {
+                    color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.92), glyph_opacity),
+                    ..style
+                },
+            });
+        }
     }
 
     // 5. Panel content: skipped below the fade-in threshold, alpha-scaled above
