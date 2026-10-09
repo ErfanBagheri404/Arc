@@ -18,7 +18,6 @@
 //! Privacy gate: capture is OFF until the user opts in, so nothing is ever
 //! recorded without consent. Turning it back off clears the file.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -78,6 +77,24 @@ struct Store {
     enabled: bool,
     #[serde(default)]
     entries: Vec<Entry>,
+}
+
+impl Store {
+    /// The history as a bare entry list, for the shared settings store.
+    fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+}
+
+impl From<Vec<Entry>> for Store {
+    fn from(entries: Vec<Entry>) -> Self {
+        Self {
+            // The shared store has no consent column; a non-empty history
+            // implies the user opted in at some point.
+            enabled: !entries.is_empty(),
+            entries,
+        }
+    }
 }
 
 /// The clipboard service: owns the file, the worker thread, and the snapshot.
@@ -307,26 +324,13 @@ fn unix_now() -> u64 {
     ticks / 10_000_000
 }
 
-fn store_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
-    base.unwrap_or_else(std::env::temp_dir)
-        .join("Arc")
-        .join("clipboard.json")
-}
-
 fn load() -> Store {
-    std::fs::read_to_string(store_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    super::settings::load_clipboard().into()
 }
 
 fn save(store: &Store) -> std::io::Result<()> {
-    let path = store_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, serde_json::to_string(store).unwrap_or_default())
+    super::settings::save_clipboard(store.entries());
+    Ok(())
 }
 
 #[cfg(test)]
