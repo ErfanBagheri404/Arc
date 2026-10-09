@@ -41,7 +41,7 @@ pub struct Snapshot {
 
 impl Calendar {
     /// Load the subscription list from disk and start the worker.
-    pub fn start() -> Self {
+    pub fn new() -> Self {
         let subs = load_subs();
         let shared = Arc::new(Mutex::new(Snapshot {
             subs: subs.clone(),

@@ -22,6 +22,7 @@ use crate::core::geom::{CornerRadii, Rect, Rgba};
 use crate::core::scene::{Align, Frame, Node, Scene, TextStyle, Weight};
 use crate::ui::layout::{island_radius, openness};
 
+pub mod calendar;
 pub mod clipboard;
 pub mod layout;
 pub mod picker;
@@ -36,7 +37,7 @@ pub use text::{line_height, measure};
 pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
-pub const TABS: [&str; 6] = ["Media", "Stats", "Timer", "Clipboard", "Color", "Usage"];
+pub const TABS: [&str; 7] = ["Media", "Stats", "Timer", "Clipboard", "Color", "Usage", "Calendar"];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
 pub const CONTENT_ROWS: usize = 3;
@@ -143,6 +144,8 @@ pub struct ViewState {
     /// Latest weather, or `None` until the first fetch lands. A standing pill
     /// row, not a HUD: it does not expire.
     pub weather: Option<crate::services::weather::Snapshot>,
+    /// Upcoming calendar events, soonest first.
+    pub cal_events: Vec<crate::services::calendar::Event>,
 }
 
 impl ViewState {
@@ -478,6 +481,8 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
         ));
     } else if state.active_tab == PICKER_TAB {
         out.extend(picker::content(fw, fh, tab_bottom, &state.picker));
+    } else if state.active_tab == CALENDAR_TAB {
+        out.extend(calendar::content(fw, fh, tab_bottom, &state.cal_events));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -490,9 +495,13 @@ pub const MEDIA_TAB: usize = 0;
 pub const STATS_TAB: usize = 1;
 /// The Timer tab — real content behind it now.
 pub const TIMER_TAB: usize = 2;
-/// The Clipboard tab — still placeholder rows.
+/// The Clipboard tab — history, consent row, clear-all.
 pub const CLIPBOARD_TAB: usize = 3;
 pub const PICKER_TAB: usize = 4;
+/// The Calendar tab — upcoming events from subscribed `.ics` sources.
+pub const CALENDAR_TAB: usize = 6;
+/// The Usage tab — still the generic placeholder rows.
+pub const USAGE_TAB: usize = 5;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -1263,10 +1272,10 @@ mod tests {
     }
 
     #[test]
-    fn panel_frame_contains_five_tabs_with_8px_gaps() {
+    fn panel_frame_contains_seven_tabs_with_8px_gaps() {
         let f = panel();
         let rects = glyph_rects(&f);
-        assert_eq!(rects.len(), 6, "expected six tabs: {:#?}", f.scene.nodes);
+        assert_eq!(rects.len(), 7, "expected seven tabs: {:#?}", f.scene.nodes);
         for w in rects.windows(2) {
             assert!(w[0].max_x() <= w[1].x + 1e-4, "tabs overlap: {w:?}");
             assert!(
@@ -1284,9 +1293,15 @@ mod tests {
     #[test]
     fn tab_strip_is_centered() {
         let rects = glyph_rects(&panel());
-        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * 5.0;
+        let natural: Vec<f32> = TABS
+            .iter()
+            .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0)
+            .collect();
         let avail = PANEL_W_REF - PANEL_PAD * 2.0;
-        let want_left = PANEL_PAD + (avail - used) / 2.0;
+        let boxes = layout::row_items(&natural, TAB_GAP, avail);
+        // glyph_rects widens each label rect back out by TAB_PAD, so the
+        // widened rect's x IS the box's left edge.
+        let want_left = PANEL_PAD + boxes[0].0;
         assert!(
             (rects[0].x - want_left).abs() < 1e-3,
             "{:?} vs {want_left}",
@@ -1312,8 +1327,9 @@ mod tests {
     fn placeholder_panel() -> Frame {
         let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
         // Usage is the one tab still on the generic placeholder rows; every
-        // other tab draws its own content now.
-        v.active_tab = crate::ui::TABS.len() - 1;
+        // other tab draws its own content now. Named, not `len() - 1` —
+        // Calendar sits after it and has real content.
+        v.active_tab = USAGE_TAB;
         build(&v)
     }
 
