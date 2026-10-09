@@ -138,7 +138,6 @@ pub fn colorref_to_rgb(v: u32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::COLORREF;
 
     #[test]
     fn hex_is_uppercase_and_zero_padded() {
