@@ -22,7 +22,7 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::System::ProcessStatus::EnumProcesses;
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, GetProcessId, GetProcessTimes, OpenProcess,
+    GetProcessId, GetProcessTimes, OpenProcess,
     QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
@@ -212,6 +212,7 @@ fn process_name(pid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
 
     #[test]
     fn the_enum_actually_finds_this_process() {

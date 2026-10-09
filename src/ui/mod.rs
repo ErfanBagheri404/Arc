@@ -22,7 +22,9 @@ use crate::core::geom::{CornerRadii, Rect, Rgba};
 use crate::core::scene::{Align, Frame, Node, Scene, TextStyle, Weight};
 use crate::ui::layout::{island_radius, openness};
 
+pub mod clipboard;
 pub mod layout;
+pub mod picker;
 pub mod media;
 pub mod stats;
 pub mod timer;
@@ -34,7 +36,7 @@ pub use text::{line_height, measure};
 pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
-pub const TABS: [&str; 5] = ["Media", "Stats", "Timer", "Clipboard", "Usage"];
+pub const TABS: [&str; 6] = ["Media", "Stats", "Timer", "Clipboard", "Color", "Usage"];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
 pub const CONTENT_ROWS: usize = 3;
@@ -132,6 +134,12 @@ pub struct ViewState {
     pub procs: crate::services::processes::Snapshot,
     /// The countdown timer, owned by the app thread.
     pub timer: crate::app::timer::Timer,
+    /// Clipboard entries and consent, owned by the clipboard service.
+    pub clip_entries: Vec<crate::services::clipboard::Entry>,
+    /// Clipboard consent: the service still owns it, the view mirrors it.
+    pub clip_enabled: bool,
+    /// The color picker's sample and trail, owned by the picker service.
+    pub picker: crate::services::picker::Picker,
 }
 
 impl ViewState {
@@ -194,6 +202,42 @@ impl ViewState {
             .into_iter()
             .find(|(r, _)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
             .map(|(_, cmd)| cmd)
+    }
+
+    /// Which clipboard control panel-space `(x, y)` hits. `0` is the consent /
+    /// capture row, `Some(i + 1)` is history row `i`.
+    pub fn clipboard_hit(&self, x: f32, y: f32) -> Option<usize> {
+        if self.active_tab != CLIPBOARD_TAB || !self.content_visible() {
+            return None;
+        }
+        let top = HEADER_Y + header_height() + HEADER_GAP;
+        if !self.clip_enabled {
+            let r = clipboard::consent_rect(self.island_width, top);
+            return (x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y()).then_some(0);
+        }
+        let k = clipboard::capture_rect(self.island_width, top);
+        if x >= k.x && x <= k.max_x() && y >= k.y && y <= k.max_y() {
+            return Some(0);
+        }
+        clipboard::rows(self.island_width, top, self.clip_entries.len())
+            .into_iter()
+            .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
+            .map(|i| i + 1)
+    }
+
+    /// Which color-picker control panel-space `(x, y)` hits: `0` is the
+    /// readout (copies the current hex), `Some(i + 1)` is trail swatch `i`.
+    pub fn picker_hit(&self, x: f32, y: f32) -> Option<usize> {
+        if self.active_tab != PICKER_TAB || !self.content_visible() {
+            return None;
+        }
+        let top = HEADER_Y + header_height() + HEADER_GAP;
+        let r = picker::readout_rect(self.island_width, top);
+        if x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y() {
+            return Some(0);
+        }
+        picker::swatch_hit(self.island_width, top, self.picker.trail_len(), x, y)
+            .map(|i| i + 1)
     }
 
     /// Which timer preset button panel-space `(x, y)` hits, if any.
@@ -390,6 +434,16 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
         out.extend(stats::content(fw, fh, tab_bottom, &state.stats, &state.procs));
     } else if state.active_tab == TIMER_TAB {
         out.extend(timer::content(fw, fh, tab_bottom, &state.timer));
+    } else if state.active_tab == CLIPBOARD_TAB {
+        out.extend(clipboard::content(
+            fw,
+            fh,
+            tab_bottom,
+            &state.clip_entries,
+            state.clip_enabled,
+        ));
+    } else if state.active_tab == PICKER_TAB {
+        out.extend(picker::content(fw, fh, tab_bottom, &state.picker));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -404,6 +458,7 @@ pub const STATS_TAB: usize = 1;
 pub const TIMER_TAB: usize = 2;
 /// The Clipboard tab — still placeholder rows.
 pub const CLIPBOARD_TAB: usize = 3;
+pub const PICKER_TAB: usize = 4;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -1177,7 +1232,7 @@ mod tests {
     fn panel_frame_contains_five_tabs_with_8px_gaps() {
         let f = panel();
         let rects = glyph_rects(&f);
-        assert_eq!(rects.len(), 5, "expected five tabs: {:#?}", f.scene.nodes);
+        assert_eq!(rects.len(), 6, "expected six tabs: {:#?}", f.scene.nodes);
         for w in rects.windows(2) {
             assert!(w[0].max_x() <= w[1].x + 1e-4, "tabs overlap: {w:?}");
             assert!(
@@ -1185,7 +1240,7 @@ mod tests {
                 "gap must be 8 px: {w:?}"
             );
         }
-        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * 4.0;
+        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * 5.0;
         assert!(
             used <= PANEL_W_REF - PANEL_PAD * 2.0 + 1e-3,
             "tab row overflows the padded frame: {used}"
@@ -1195,7 +1250,7 @@ mod tests {
     #[test]
     fn tab_strip_is_centered() {
         let rects = glyph_rects(&panel());
-        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * 4.0;
+        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * 5.0;
         let avail = PANEL_W_REF - PANEL_PAD * 2.0;
         let want_left = PANEL_PAD + (avail - used) / 2.0;
         assert!(
@@ -1222,7 +1277,9 @@ mod tests {
     /// A panel on a tab that still draws the generic placeholder rows.
     fn placeholder_panel() -> Frame {
         let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
-        v.active_tab = crate::ui::CLIPBOARD_TAB;
+        // Usage is the one tab still on the generic placeholder rows; every
+        // other tab draws its own content now.
+        v.active_tab = crate::ui::TABS.len() - 1;
         build(&v)
     }
 
