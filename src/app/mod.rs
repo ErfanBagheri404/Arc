@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 use crate::platform::{ClickThrough, Event, Overlay, Renderer};
 use crate::services::media::Media;
 use crate::services::audio::{self, Audio};
+use crate::services::clipboard::Clipboard;
+use crate::services::picker::Picker;
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use crate::services::processes::Processes;
 use crate::services::metrics::Sampler;
 use crate::services::power;
@@ -193,6 +197,8 @@ pub fn run() -> std::process::ExitCode {
     // 250 ms cadence live there, the app only reads the snapshot.
     let audio = Audio::start();
     let procs = Processes::start();
+    let clip = Clipboard::start();
+    let picker = Picker::new();
     let mut last_audio_state: Option<(u8, bool)> = None;
 
     // Countdown: the app owns the clock, the UI only formats. Kept next to the
@@ -245,6 +251,28 @@ pub fn run() -> std::process::ExitCode {
                             view.timer = timer.view;
                             redraw = true;
                         }
+                    } else if let Some(hit) = view.picker_hit(lx, ly) {
+                        // 0 is the readout; every other hit is trail swatch
+                        // `i - 1`. Either way, copy that color's hex.
+                        let hex = if hit == 0 {
+                            picker.current().map(|c| c.hex())
+                        } else {
+                            picker.trail().get(hit - 1).map(|c| c.hex())
+                        };
+                        if let Some(hex) = hex {
+                            let _ = Clipboard::restore(&hex);
+                        }
+                    } else if let Some(hit) = view.clipboard_hit(lx, ly) {
+                        // 0 is the consent row when off or the capture row when
+                        // on; every other hit is history row `i - 1`.
+                        if !clip.enabled() {
+                            clip.set_enabled(true);
+                        } else if hit == 0 {
+                            clip.clear();
+                        } else if let Some(entry) = view.clip_entries.get(hit - 1) {
+                            let _ = Clipboard::restore(&entry.text.clone());
+                        }
+                        redraw = true;
                     } else if view.click_tab(lx, ly).is_some() {
                         redraw = true;
                     }
@@ -310,6 +338,28 @@ pub fn run() -> std::process::ExitCode {
         // indicator, so it just rides on the view.
         let a = audio.snapshot();
         view.procs = procs.snapshot();
+        // The picker samples wherever the cursor is, tab or no tab: one
+        // GetCursorPos plus one GetPixel per tick, both microseconds.
+        if view.active_tab == ui::PICKER_TAB {
+            let mut pt = POINT::default();
+            // SAFETY: `pt` is a valid POINT for the call's duration.
+            if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+                let before = picker.current();
+                if picker.sample_at(pt.x, pt.y).is_some() && picker.current() != before {
+                    redraw = true;
+                }
+            }
+        }
+        let clip_entries = clip.snapshot();
+        let clip_enabled = clip.enabled();
+        if view.active_tab == ui::PICKER_TAB {
+            view.picker = picker.clone();
+        }
+        if clip_entries != view.clip_entries || clip_enabled != view.clip_enabled {
+            view.clip_entries = clip_entries;
+            view.clip_enabled = clip_enabled;
+            redraw = true;
+        }
         if a.mic_active != view.mic_active {
             view.mic_active = a.mic_active;
             redraw = true;
