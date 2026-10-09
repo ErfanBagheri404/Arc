@@ -19,6 +19,7 @@ use crate::services::clipboard::Clipboard;
 use crate::services::picker::Picker;
 use crate::services::calendars::Calendar;
 use crate::services::downloads::Downloads;
+use crate::services::shelf::Shelf;
 use crate::services::weather::Weather;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -106,6 +107,17 @@ const POWER_POLL: Duration = Duration::from_millis(500);
 /// Arm a volume HUD when the master volume or mute state *changes*. Same rule as
 /// the battery: the transition is the event, holding the key just extends it.
 /// Returns `true` when the layer was armed and a repaint is due.
+/// A subscription's display name from its URL: the host, which is what the
+/// user recognises. `None` when the clipboard text is not a URL at all.
+fn sub_name(url: &str) -> Option<String> {
+    let t = url.trim();
+    let rest = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    (!host.is_empty() && host.contains('.')).then(|| host.to_string())
+}
+
 fn volume_hud(
     a: &audio::AudioState,
     last: &mut Option<(u8, bool)>,
@@ -205,6 +217,7 @@ pub fn run() -> std::process::ExitCode {
     let weather = Weather::new();
     let cals = Calendar::new();
     let downloads = Downloads::new();
+    let mut shelf = Shelf::load();
     let mut last_audio_state: Option<(u8, bool)> = None;
 
     // Countdown: the app owns the clock, the UI only formats. Kept next to the
@@ -241,6 +254,15 @@ pub fn run() -> std::process::ExitCode {
         for event in overlay.pump_events() {
             match event {
                 Event::ToggleIsland => state.toggle(),
+                // A file dropped on the island pins to the shelf.
+                Event::FilesDropped { paths } => {
+                    for p in paths {
+                        if shelf.pin(std::path::Path::new(&p)) {
+                            redraw = true;
+                        }
+                    }
+                    view.shelf = shelf.items().to_vec();
+                }
                 Event::FullscreenEnter => state.hide(),
                 // Back to whatever we were showing before the fullscreen app —
                 // not unconditionally the panel.
@@ -277,6 +299,31 @@ pub fn run() -> std::process::ExitCode {
                             clip.clear();
                         } else if let Some(entry) = view.clip_entries.get(hit - 1) {
                             let _ = Clipboard::restore(&entry.text.clone());
+                        }
+                        redraw = true;
+                    } else if let Some(hit) = view.calendar_hit(lx, ly) {
+                        // Row 0 pastes the clipboard as a new `.ics` URL; any
+                        // other row removes that subscription.
+                        if hit == 0 {
+                            if let Some(url) = crate::services::clipboard::paste() {
+                                if let Some(name) = sub_name(url.trim()) {
+                                    cals.subscribe(&name, url.trim());
+                                    view.cal = cals.snapshot();
+                                }
+                            }
+                        } else if let Some(sub) = view.cal.subs.get(hit - 1) {
+                            cals.unsubscribe(&sub.url.clone());
+                            view.cal = cals.snapshot();
+                        }
+                        redraw = true;
+                    } else if let Some(i) = view.shelf_hit(lx, ly) {
+                        // A pinned tile opens with its default handler; a
+                        // missing one drops from the shelf.
+                        if let Some(item) = view.shelf.get(i) {
+                            if !crate::services::shelf::open(std::path::Path::new(&item.path)) {
+                                shelf.unpin(&item.path.clone());
+                                view.shelf = shelf.items().to_vec();
+                            }
                         }
                         redraw = true;
                     } else if view.click_tab(lx, ly).is_some() {
@@ -367,9 +414,9 @@ pub fn run() -> std::process::ExitCode {
             view.clip_enabled = clip_enabled;
             redraw = true;
         }
-        let cal_events = cals.snapshot().events;
-        if cal_events != view.cal_events {
-            view.cal_events = cal_events;
+        let cal = cals.snapshot();
+        if cal != view.cal {
+            view.cal = cal;
             redraw = true;
         }
         let dl = downloads.snapshot();

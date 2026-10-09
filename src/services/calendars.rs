@@ -103,12 +103,6 @@ impl Calendar {
         self.shared.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
-    /// The next event that has not started yet, if any.
-    pub fn next(&self) -> Option<Event> {
-        let now = now();
-        self.snapshot().events.into_iter().find(|e| e.start > now)
-    }
-
     /// Add a subscription and persist it.
     pub fn subscribe(&self, name: &str, url: &str) {
         let Some(mut g) = self.shared.lock().ok() else {

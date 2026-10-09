@@ -29,6 +29,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey,
     HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_A,
@@ -41,8 +42,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
-    WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_CAPTION,
+    WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING,
+    WNDCLASSEXW, WS_CAPTION,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP,
 };
 
@@ -340,6 +342,27 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        // Files dropped from Explorer. The list is queried into a buffer
+        // of the size Shell reports, then the drop handle is freed.
+        WM_DROPFILES => {
+            let hdrop = HDROP(lparam.0 as *mut core::ffi::c_void);
+            let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+            let mut paths = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                // Query once for the length, then once into a buffer.
+                let n = unsafe { DragQueryFileW(hdrop, i, None) };
+                let mut buf = vec![0u16; n as usize + 1];
+                let got = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) };
+                if got > 0 {
+                    buf.truncate(got as usize);
+                    paths.push(String::from_utf16_lossy(&buf));
+                }
+            }
+            unsafe { DragFinish(hdrop) };
+            push_event(hwnd, Event::FilesDropped { paths });
+            LRESULT(0)
+        }
+
         // The DirectComposition surface owns every pixel; suppress the default
         // erase so there is no white flash before the renderer's first Present.
         WM_ERASEBKGND => LRESULT(1),
@@ -557,6 +580,11 @@ impl Overlay {
         // SAFETY: publishes the Box's stable address for the lifetime of this
         // Overlay; cleared again in `Drop` before the Box is freed.
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
+
+        // Accept file drops; they arrive as `WM_DROPFILES`. Registered after
+        // the HWND exists, so the message can never arrive before the handler.
+        // SAFETY: valid HWND owned by this process.
+        unsafe { DragAcceptFiles(hwnd, true) };
 
         let mut overlay = Self {
             hwnd,
