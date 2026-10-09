@@ -52,6 +52,9 @@ impl Calendar {
         std::thread::Builder::new()
             .name("calendar".into())
             .spawn(move || {
+                // Reminder state: which events have already fired, so a
+                // restart does not re-toast yesterday's meeting.
+                let mut fired: Vec<String> = Vec::new();
                 while al.load(Ordering::Relaxed) {
                     let subs = sh.lock().map(|g| g.subs.clone()).unwrap_or_default();
                     let mut merged = Snapshot {
@@ -65,10 +68,21 @@ impl Calendar {
                         }
                     }
                     // Soonest first, and drop anything already over.
-                    let now = now();
-                    merged.events.retain(|e| e.end > now);
+                    merged.events.retain(|e| e.end > now());
                     merged.events.sort_by_key(|e| e.start);
                     merged.events.truncate(50);
+                    // Fire a reminder for each event whose start just passed.
+                    let now = now();
+                    for e in &merged.events {
+                        if e.start <= now && !fired.contains(&e.summary) {
+                            fired.push(e.summary.clone());
+                            crate::platform::tray::notify("Arc", &e.label());
+                        }
+                    }
+                    // Keep the fired list from growing without bound.
+                    if fired.len() > 50 {
+                        fired.drain(..fired.len() - 50);
+                    }
                     if let Ok(mut g) = sh.lock() {
                         *g = merged;
                     }
