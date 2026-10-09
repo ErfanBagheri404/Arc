@@ -22,6 +22,7 @@ use crate::services::downloads::Downloads;
 use crate::services::shelf::Shelf;
 use crate::services::weather::Weather;
 use windows::Win32::Foundation::POINT;
+use std::path::PathBuf;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use crate::services::processes::Processes;
 use crate::services::metrics::Sampler;
@@ -107,6 +108,14 @@ const POWER_POLL: Duration = Duration::from_millis(500);
 /// Arm a volume HUD when the master volume or mute state *changes*. Same rule as
 /// the battery: the transition is the event, holding the key just extends it.
 /// Returns `true` when the layer was armed and a repaint is due.
+/// Is either shift key down right now? Modifiers are not delivered as window
+/// messages to a click-through overlay, so this is polled at the click.
+fn shift_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT, VK_LSHIFT, VK_RSHIFT};
+    // SAFETY: a pure state query, no pointers.
+    unsafe { [VK_SHIFT, VK_LSHIFT, VK_RSHIFT].iter().any(|k| GetAsyncKeyState(k.0 as i32) < 0) }
+}
+
 /// A subscription's display name from its URL: the host, which is what the
 /// user recognises. `None` when the clipboard text is not a URL at all.
 fn sub_name(url: &str) -> Option<String> {
@@ -318,9 +327,12 @@ pub fn run() -> std::process::ExitCode {
                         redraw = true;
                     } else if let Some(i) = view.shelf_hit(lx, ly) {
                         // A pinned tile opens with its default handler; a
-                        // missing one drops from the shelf.
+                        // missing one drops from the shelf. Shift sends it to
+                        // LocalSend instead, which opens its own target picker.
                         if let Some(item) = view.shelf.get(i) {
-                            if !crate::services::shelf::open(std::path::Path::new(&item.path)) {
+                            if shift_held() {
+                                crate::services::localsend::handoff(&[PathBuf::from(&item.path)]);
+                            } else if !crate::services::shelf::open(std::path::Path::new(&item.path)) {
                                 shelf.unpin(&item.path.clone());
                                 view.shelf = shelf.items().to_vec();
                             }
