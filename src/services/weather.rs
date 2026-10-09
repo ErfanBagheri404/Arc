@@ -116,7 +116,7 @@ fn fetch() -> Option<Snapshot> {
 
 /// One HTTPS GET via WinINet, body capped at 64 KiB. Returns `None` on any
 /// failure; this is a status pill, not a critical path.
-fn http(url: &str) -> Option<String> {
+pub(crate) fn http(url: &str) -> Option<String> {
     use windows::core::PCWSTR;
     use windows::Win32::Networking::WinInet::{
         InternetCloseHandle, InternetOpenUrlW, InternetOpenW, InternetReadFile,
