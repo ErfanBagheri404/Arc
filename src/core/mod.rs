@@ -16,6 +16,8 @@ pub mod imagedb;
 pub mod geom;
 #[allow(dead_code)]
 pub mod scene;
+#[allow(dead_code)]
+pub mod termscreen;
 
 // Re-export barrel: this is the crate's internal public surface, used by layers
 // below. Individual items are not all referenced yet (the island shell landed before
