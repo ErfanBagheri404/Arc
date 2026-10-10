@@ -8,13 +8,13 @@ use crate::core::anim::{Spring, SpringConfig};
 /// Reference geometry, verbatim from the reference design's external-display mode.
 pub const PILL_W: f32 = 185.0;
 pub const PILL_H: f32 = 32.0;
-/// Collapsed corner radius. Not `h / 2`: a capsule end is exactly what the
-/// reference is not. `10` leaves a 12 px straight edge (37% of the height),
-/// matching the measured 30-50% on the reference images.
-pub const PILL_RADIUS: f32 = 10.0;
+/// Collapsed bottom corner radius. The top corners are square (the island
+/// hangs from the screen edge), so the bottom pair carries the whole shape:
+/// `h / 2` gives a true semicircular bottom, the iOS hanging-pill look.
+pub const PILL_RADIUS: f32 = 16.0;
 pub const PANEL_W: f32 = 640.0;
 pub const PANEL_H: f32 = 200.0;
-pub const PANEL_RADIUS: f32 = 24.0;
+pub const PANEL_RADIUS: f32 = 28.0;
 
 /// Dwell time before hover expands the island, in seconds (Phase 2, hover).
 /// Short enough to feel like a reaction, long enough not to fire on a mouse

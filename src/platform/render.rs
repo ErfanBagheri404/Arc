@@ -54,13 +54,14 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows_numerics::Matrix3x2;
 
@@ -413,14 +414,42 @@ impl Renderer {
         Ok(())
     }
 
-    /// Recreate the swapchain for a new size. Idempotent for an unchanged size.
+    /// Resize the back buffers for a new size. Idempotent for an unchanged size.
+    ///
+    /// `ResizeBuffers` on the live swapchain, never a device rebuild: the
+    /// island animates its size every frame while it morphs, and tearing down
+    /// the D3D device, the composition visual and the DComp target that often
+    /// is what makes the morph flicker. Nothing here needs the device recreated.
     pub fn resize(&mut self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
         if width == self.width && height == self.height && !self.degraded {
             return;
         }
-        self.rebuild(width, height);
+        self.width = width;
+        self.height = height;
+        // No chain yet (or a degraded one): a full build is the only path.
+        let Some(swapchain) = self.swapchain.clone() else {
+            self.rebuild(width, height);
+            return;
+        };
+        // Flip-model back buffers cannot rotate while a reference is alive,
+        // so drop every cached render target before handing the chain back.
+        self.formats.clear();
+        // SAFETY: our own swapchain; no buffer references are outstanding.
+        let resized = unsafe {
+            swapchain.ResizeBuffers(
+                0,
+                width,
+                height,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
+        };
+        if resized.is_err() {
+            // A failed resize can leave the chain unusable; rebuild once.
+            self.rebuild(width, height);
+        }
     }
 
     /// Draw one frame and present it.

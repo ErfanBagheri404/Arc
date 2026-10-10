@@ -415,13 +415,19 @@ pub fn build(state: &ViewState) -> Frame {
     let mut scene = Scene::new();
 
     // 1. The body. Always emitted, always the whole frame, always pure black and
-    //    opaque. This is the whole look. All four corners carry the same radius
-    //    (iOS style): the reference pill reads as a rounded rect, not a capsule
-    //    and not a square-topped tab. The radius is clamped to what the rect can
-    //    actually render.
+    //    opaque. This is the whole look. The island hangs flush from the top
+    //    edge, so its top two corners are square; only the bottom two carry the
+    //    iOS continuous-corner radius. Rounding the top corners leaves two
+    //    notches of desktop showing through against the screen edge.
     scene.push(Node::RoundRect {
         rect: frame,
-        radii: CornerRadii::uniform(radius).clamped(fw, fh),
+        radii: CornerRadii {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_right: radius,
+            bottom_left: radius,
+        }
+        .clamped(fw, fh),
         fill: Rgba::BLACK,
     });
 
@@ -1429,38 +1435,33 @@ mod tests {
     }
 
     #[test]
-    fn body_corners_are_uniform_ios_style() {
-        // The reference pill carries the same continuous-corner radius on all
-        // four corners: measured on the reference, the top rows taper inward
-        // exactly like the bottom rows. Not a capsule (r = h/2), not a
-        // square-topped tab.
+    fn body_corners_are_square_on_top_and_ios_rounded_below() {
+        // The island hangs flush from the top edge, so the top corners meet the
+        // screen edge square; rounding them would notch the desktop through.
+        // Only the bottom pair carries the iOS continuous-corner radius.
         let Node::RoundRect { radii, .. } = &collapsed().scene.nodes[0] else {
             panic!()
         };
-        assert_eq!(*radii, CornerRadii::uniform(PILL_RADIUS_REF));
-        assert_eq!(radii.top_left, PILL_RADIUS_REF, "top-left must be rounded");
-        assert_eq!(
-            radii.top_right, PILL_RADIUS_REF,
-            "top-right must be rounded"
-        );
+        assert_eq!(radii.top_left, 0.0, "top-left must be square");
+        assert_eq!(radii.top_right, 0.0, "top-right must be square");
         assert_eq!(radii.bottom_left, PILL_RADIUS_REF);
         assert_eq!(radii.bottom_right, PILL_RADIUS_REF);
-        assert_eq!(PILL_RADIUS_REF, 10.0);
+        assert_eq!(PILL_RADIUS_REF, 16.0);
     }
 
     #[test]
     fn expanded_body_keeps_its_corners_rounded_too() {
-        // The panel morph carries the same uniform rounding: no corner ever
-        // goes square at any point of the morph.
+        // The panel morph keeps the same square-top / rounded-bottom shape at
+        // every point, and the bottom radius only ever grows toward the panel's.
         for open in [0.0f32, 0.5, 1.0] {
             let f = build(&view_sized(width_at(open), height_at(open)));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
-            assert_eq!(radii.top_left, radii.bottom_left, "at {open}");
-            assert_eq!(radii.top_right, radii.bottom_right, "at {open}");
-            assert!(radii.top_left > 0.0, "top-left rounded at {open}");
-            assert!(radii.bottom_right > 0.0);
+            assert_eq!(radii.top_left, 0.0, "top-left square at {open}");
+            assert_eq!(radii.top_right, 0.0, "top-right square at {open}");
+            assert_eq!(radii.bottom_left, radii.bottom_right, "at {open}");
+            assert!(radii.bottom_left > 0.0, "bottom rounded at {open}");
         }
     }
 
@@ -1752,11 +1753,8 @@ mod tests {
                 "at {open}: {:?}",
                 radii
             );
-            assert_eq!(radii.top_left, radii.bottom_left, "corners split at {open}");
-            assert_eq!(
-                radii.top_right, radii.bottom_right,
-                "corners split at {open}"
-            );
+            assert_eq!(radii.top_left, 0.0, "top square at {open}");
+            assert_eq!(radii.top_right, 0.0, "top square at {open}");
             assert!(radii.bottom_left >= prev, "radius dipped at {open}");
             prev = radii.bottom_left;
         }
