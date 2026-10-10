@@ -232,7 +232,7 @@ pub fn run() -> std::process::ExitCode {
     // The terminal is a long-lived shell: spawn once, keep it for the app's
     // lifetime. A failed spawn leaves `terminal` as a dead-but-valid surface
     // whose `error()` the UI shows instead of a blank grid.
-    let mut terminal = Terminal::new();
+    let terminal = Terminal::new();
     // Focus is expensive to change and easy to thrash, so it flips only on a
     // transition, not every frame.
     let mut had_keys = false;
@@ -512,7 +512,10 @@ pub fn run() -> std::process::ExitCode {
         // click-through), so it has to be stepped even on frames where nothing
         // else woke us up.
         let hover_changed = state.hover_step(overlay.pointer_over(), dt.as_secs_f32());
-        let animating = state.step_dt(dt.as_secs_f32());
+        // The tab swap runs its own springs; while either is live the island
+        // repaints so the crossfade/rise plays out.
+        let swap_busy = view.tab_swap.step(dt.as_secs_f32());
+        let animating = state.step_dt(dt.as_secs_f32()) || swap_busy;
 
         // A hidden island is not just un-drawn: it is removed from the screen so
         // it cannot sit over the fullscreen app it is hiding for.
