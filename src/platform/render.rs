@@ -84,6 +84,7 @@ struct FormatKey {
     size_bits: u32,
     weight: i32,
     tabular: bool,
+    mono: bool,
 }
 
 /// D2D renders onto a premultiplied surface, so a brush colour must be
@@ -123,6 +124,7 @@ fn format_key(style: &TextStyle) -> FormatKey {
         size_bits: style.size.max(0.0).to_bits(),
         weight,
         tabular: style.tabular,
+        mono: style.mono,
     }
 }
 
@@ -739,7 +741,16 @@ impl Renderer {
         let locale = wide("");
         let mut last_err = None;
         let mut format = None;
-        for family_name in ["Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI"] {
+        // The terminal grid needs a fixed-pitch family; the fallback
+        // chain mirrors the proportional one (absent SKU → plain).
+        let families: [&str; 4] = if style.mono {
+            ["Cascadia Mono", "Cascadia Code", "Consolas", "Courier New"]
+        } else {
+            // Fourth slot unused on the proportional path: DWrite resolves the
+            // first three, and "Segoe UI" ships on every SKU.
+            ["Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Segoe UI"]
+        };
+        for family_name in families {
             let family = wide(family_name);
             match unsafe {
                 factory.CreateTextFormat(

@@ -44,6 +44,12 @@ pub enum Event {
     FilesDropped {
         paths: Vec<String>,
     },
+    /// A keypress while the island is interactive (Unicode code
+    /// point). Routed to the terminal grid when the Terminal tab is
+    /// open; ignored otherwise.
+    Key {
+        ch: char,
+    },
     /// Foreground window became fullscreen on our monitor → hide.
     FullscreenEnter,
     FullscreenExit,

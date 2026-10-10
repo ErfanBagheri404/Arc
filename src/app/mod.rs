@@ -20,6 +20,7 @@ use crate::services::picker::Picker;
 use crate::services::calendars::Calendar;
 use crate::services::downloads::Downloads;
 use crate::services::shelf::Shelf;
+use crate::services::terminal::Terminal;
 use crate::services::weather::Weather;
 use windows::Win32::Foundation::POINT;
 use std::path::PathBuf;
@@ -228,6 +229,13 @@ pub fn run() -> std::process::ExitCode {
     let downloads = Downloads::new();
     let mut shelf = Shelf::load();
     let mut last_audio_state: Option<(u8, bool)> = None;
+    // The terminal is a long-lived shell: spawn once, keep it for the app's
+    // lifetime. A failed spawn leaves `terminal` as a dead-but-valid surface
+    // whose `error()` the UI shows instead of a blank grid.
+    let mut terminal = Terminal::new();
+    // Focus is expensive to change and easy to thrash, so it flips only on a
+    // transition, not every frame.
+    let mut had_keys = false;
 
     // Countdown: the app owns the clock, the UI only formats. Kept next to the
     // island state because the run continues while the island is collapsed.
@@ -357,7 +365,30 @@ pub fn run() -> std::process::ExitCode {
                         redraw = true;
                     }
                 }
-                Event::Resized { .. } | Event::Redraw => redraw = true,
+                // Printable keys go to the shell while the Terminal tab is
+                // open. The island is click-through when collapsed, so these
+                // only arrive while the panel is interactive.
+                Event::Key { ch } => {
+                    if view.active_tab == ui::TERMINAL_TAB && view.content_visible() {
+                        if ch == '\r' {
+                            terminal.line("");
+                        } else if ch == '\x7f' || ch == '\u{8}' {
+                            terminal.key(0x08);
+                        } else if !ch.is_control() {
+                            let mut buf = [0u8; 4];
+                            terminal.write(ch.encode_utf8(&mut buf).as_bytes());
+                        }
+                        redraw = true;
+                    }
+                }
+                Event::Resized { .. } | Event::Redraw => {
+                    // The grid is sized to the panel, so a resize means the
+                    // shell's viewport changed too.
+                    if view.active_tab == ui::TERMINAL_TAB {
+                        terminal.resize(80, 24);
+                    }
+                    redraw = true;
+                }
                 Event::Quit => return std::process::ExitCode::SUCCESS,
             }
         }
@@ -403,6 +434,13 @@ pub fn run() -> std::process::ExitCode {
         // indicator, so it just rides on the view.
         let a = audio.snapshot();
         view.procs = procs.snapshot();
+        // The terminal's grid is owned by the service (a reader thread feeds
+        // it); the view only mirrors it so `build` stays pure. A dead shell
+        // stops repainting, which is the correct look.
+        if view.active_tab == ui::TERMINAL_TAB {
+            view.terminal = Some(terminal.screen());
+            view.terminal_error = terminal.error().map(str::to_string);
+        }
         // The picker samples wherever the cursor is, tab or no tab: one
         // GetCursorPos plus one GetPixel per tick, both microseconds.
         if view.active_tab == ui::PICKER_TAB {
@@ -493,6 +531,18 @@ pub fn run() -> std::process::ExitCode {
             } else {
                 ClickThrough::Yes
             });
+            // Keyboard focus follows the Terminal tab: the island is
+            // NOACTIVATE, so without this `WM_CHAR` goes to whatever app the
+            // user is actually typing in — the wrong target for a shell.
+            let wants_keys = state.expanded() && view.active_tab == ui::TERMINAL_TAB;
+            if wants_keys != had_keys {
+                had_keys = wants_keys;
+                if wants_keys {
+                    overlay.take_focus();
+                } else {
+                    overlay.release_focus();
+                }
+            }
             renderer.resize(
                 overlay.dpi().snap(state.logical_width()),
                 overlay.dpi().snap(state.logical_height()),

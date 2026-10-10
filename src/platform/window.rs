@@ -31,7 +31,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey,
+    RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, UnregisterHotKey,
     HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_A,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -376,6 +376,16 @@ unsafe extern "system" fn wnd_proc(
             }
         }
 
+        // Printable keypresses. The island is a click-through overlay,
+        // so these only fire while the panel is interactive (not
+        // click-through); routed to the terminal grid in `app`.
+        WM_CHAR => {
+            if let Some(ch) = char::from_u32(wparam.0 as u32) {
+                push_event(hwnd, Event::Key { ch });
+            }
+            LRESULT(0)
+        }
+
         WM_MOUSEMOVE => {
             let (x, y) = lparam_xy(lparam);
             push_event(
@@ -690,6 +700,31 @@ impl Overlay {
 
     /// Toggle whether the island swallows mouse input. Collapsed ⇒ pass-through,
     /// expanded ⇒ the panel takes input.
+    /// Take keyboard focus for the island, so `WM_CHAR` / `WM_KEYDOWN` are
+    /// delivered here instead of to the app underneath.
+    ///
+    /// The island is `WS_EX_NOACTIVATE` on purpose — hovering it must never
+    /// steal focus from the user's real work. Typing into the Terminal tab is
+    /// the one case where focus is wanted, so it is explicit: the app calls
+    /// this only while that tab is open, and [`Self::release_focus`] gives it
+    /// back.
+    pub fn take_focus(&mut self) {
+        // SAFETY: our own HWND; SetFocus on a NOACTIVATE window is legal and
+        // does not raise it to the foreground.
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+    }
+
+    /// Drop keyboard focus back to the foreground app.
+    pub fn release_focus(&mut self) {
+        // SAFETY: `None` drops focus to the desktop rather than to another
+        // window, which is the documented way to leave nothing focused.
+        unsafe {
+            let _ = SetFocus(None);
+        }
+    }
+
     pub fn set_click_through(&mut self, mode: ClickThrough) {
         if self.state.click_through == mode {
             return;

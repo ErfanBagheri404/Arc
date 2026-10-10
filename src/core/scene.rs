@@ -48,6 +48,8 @@ pub struct TextStyle {
     /// Use tabular figures (essential for timers and progress so digits don't jitter).
     pub tabular: bool,
     pub align: Align,
+    /// Use a monospaced family (the terminal grid).
+    pub mono: bool,
 }
 
 impl Default for TextStyle {
@@ -58,6 +60,7 @@ impl Default for TextStyle {
             color: Rgba::WHITE,
             tabular: false,
             align: Align::Start,
+            mono: false,
         }
     }
 }
