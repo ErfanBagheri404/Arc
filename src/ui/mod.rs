@@ -30,6 +30,7 @@ pub mod picker;
 pub mod media;
 pub mod stats;
 pub mod timer;
+pub mod usage;
 pub mod terminal;
 pub mod text;
 
@@ -157,6 +158,8 @@ pub struct ViewState {
     pub shelf: Vec<crate::services::shelf::Item>,
     /// Calendar subscriptions plus upcoming events.
     pub cal: crate::services::calendars::Snapshot,
+    /// LLM usage (Claude Code, Codex) over the rolling window.
+    pub usage: crate::services::usage::Snapshot,
     /// The terminal grid, snapshotted by the app thread from the terminal
     /// service each frame (same rule as `media`: `build` stays pure).
     pub terminal: Option<crate::core::termscreen::Screen>,
@@ -661,6 +664,8 @@ fn panel_content_for(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Nod
         out.extend(calendar::content(fw, fh, tab_bottom, &state.cal));
     } else if tab == SHELF_TAB {
         out.extend(shelf::content(fw, fh, tab_bottom, &state.shelf));
+    } else if tab == USAGE_TAB {
+        out.extend(usage::content(fw, fh, tab_bottom, &state.usage));
     } else if tab == TERMINAL_TAB {
         out.extend(terminal::content(
             fw,
@@ -1540,20 +1545,28 @@ mod tests {
     /// A Stats-tab panel: the Media tab draws real content, so the placeholder
     /// row assertions belong to a placeholder tab.
     /// A panel on a tab that still draws the generic placeholder rows.
+    /// The generic content rows laid out at the frame's tab strip bottom —
+    /// the same call every non-content tab gets from `panel_content_for`.
+    /// Every tab now has real content, so these tests call the builder
+    /// directly instead of looking up "the placeholder tab" by index.
+    fn placeholder_rows() -> Vec<Node> {
+        let v = view_sized(PANEL_W_REF, PANEL_H_REF);
+        // Match what `build` measures for the real tab strip.
+        let tabs = tab_strip(PANEL_W_REF, PANEL_H_REF, header_height(), &v);
+        let bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
+        content_rows(PANEL_W_REF, PANEL_H_REF, bottom, &v)
+    }
+
+    /// The placeholder rows laid out inside a full built frame, so the
+    /// row-fill assertions can scan every node in the panel.
     fn placeholder_panel() -> Frame {
-        let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
-        // Usage is the one tab still on the generic placeholder rows; every
-        // other tab draws its own content now. Named, not `len() - 1` —
-        // Calendar sits after it and has real content.
-        v.active_tab = USAGE_TAB;
-        build(&v)
+        build(&view_sized(PANEL_W_REF, PANEL_H_REF))
     }
 
     #[test]
     fn panel_content_has_three_placeholder_rows() {
-        let f = placeholder_panel();
-        let rows = row_rects(&f);
-        assert_eq!(rows.len(), CONTENT_ROWS, "{:#?}", f.scene.nodes);
+        let rows: Vec<Rect> = placeholder_rows().iter().map(|n| n.rect()).collect();
+        assert_eq!(rows.len(), CONTENT_ROWS, "{rows:?}");
         for w in rows.windows(2) {
             assert!(w[1].y > w[0].max_y(), "rows must not overlap: {w:?}");
             assert!(
@@ -1571,28 +1584,24 @@ mod tests {
 
     #[test]
     fn content_rows_use_the_reference_4pct_micro_fill_and_r8() {
-        let f = placeholder_panel();
-        let rows = row_rects(&f);
+        let rows = placeholder_rows();
         assert_eq!(rows.len(), CONTENT_ROWS);
         let inner = PANEL_W_REF - PANEL_PAD * 2.0;
-        for n in all_nodes(&f) {
+        for n in rows {
             if let Node::RoundRect { rect, radii, fill } = n {
-                // Content rows only: the tab pill is also a rounded rect and
-                // carries the selection fill instead.
-                if (rect.w - inner).abs() < 1e-3 {
-                    assert_eq!(fill, Rgba::rgba(1.0, 1.0, 1.0, 0.04), "4 % white: {rect:?}");
-                    assert!(
-                        (radii.top_left - ROW_RADIUS).abs() < 1e-4,
-                        "reference row radius is 8: {rect:?}"
-                    );
-                }
+                assert!((rect.w - inner).abs() < 1e-3, "row width: {rect:?}");
+                assert_eq!(fill, Rgba::rgba(1.0, 1.0, 1.0, 0.04), "4 % white: {rect:?}");
+                assert!(
+                    (radii.top_left - ROW_RADIUS).abs() < 1e-4,
+                    "reference row radius is 8: {rect:?}"
+                );
             }
         }
     }
 
     #[test]
     fn content_sits_between_the_tab_strip_and_the_footer() {
-        let f = panel();
+        let f = placeholder_panel();
         let tabs_bottom = glyph_rects(&f)
             .iter()
             .map(|r| r.max_y())

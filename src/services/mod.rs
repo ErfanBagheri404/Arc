@@ -17,3 +17,4 @@ pub mod media;
 pub mod metrics;
 pub mod processes;
 pub mod power;
+pub mod usage;

@@ -226,6 +226,7 @@ pub fn run() -> std::process::ExitCode {
     let picker = Picker::new();
     let weather = Weather::new();
     let cals = Calendar::new();
+    let usage = crate::services::usage::Usage::new();
     let downloads = Downloads::new();
     let mut shelf = Shelf::load();
     let mut last_audio_state: Option<(u8, bool)> = None;
@@ -467,6 +468,11 @@ pub fn run() -> std::process::ExitCode {
         let cal = cals.snapshot();
         if cal != view.cal {
             view.cal = cal;
+            redraw = true;
+        }
+        let usg = usage.snapshot();
+        if usg != view.usage {
+            view.usage = usg;
             redraw = true;
         }
         let dl = downloads.snapshot();
