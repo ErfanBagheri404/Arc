@@ -11,6 +11,7 @@ pub mod calendar;
 pub mod downloads;
 pub mod localsend;
 pub mod shelf;
+pub mod terminal;
 pub mod calendars;
 pub mod media;
 pub mod metrics;

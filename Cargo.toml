@@ -43,6 +43,13 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_System_Console",
+    # ConPTY: CreatePipe for the PTY pair, SECURITY_ATTRIBUTES for the
+    # inheritable ends, ReadFile/WriteFile on them, and the proc-thread
+    # attribute list that attaches a child process to the console.
+    "Win32_System_Pipes",
+    # ReadFile/WriteFile on the pipe handles live behind this gate even though
+    # they are re-exported from Storage::FileSystem.
+    "Win32_System_IO",
     "Win32_System_Variant",
     "Win32_Security",
     "Win32_System_Power",
@@ -64,6 +71,10 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# vte with default-features + 'ansi': default `Cursor`/`Attributes`/`Cell`
+# grid types only exist behind that feature. Full vte feature set would drag in
+# crossbeam + other crates we don't need.
+vte = { version = "0.15.0", default-features = false, features = ["ansi"] }
 
 [profile.release]
 opt-level = "z"
