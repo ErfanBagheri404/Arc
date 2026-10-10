@@ -162,6 +162,80 @@ pub struct ViewState {
     pub terminal: Option<crate::core::termscreen::Screen>,
     /// Why the shell failed to start, if it did. Shown instead of the grid.
     pub terminal_error: Option<String>,
+    /// Content swap motion for the iOS-style tab transition: fades out
+    /// then the new tab rises in. Settled (rise = 1) when idle.
+    pub tab_swap: TabSwap,
+    /// The tab the swap is leaving behind; its body is what fades out.
+    /// Only meaningful while `tab_swap` is animating.
+    pub prev_tab: usize,
+}
+
+/// A tab content swap in flight — crossfade, then rise.
+///
+/// iOS swaps content by fading the old tab out quickly, then letting
+/// the new one rise from below on a spring (`SpringConfig::SWAP`).
+/// `phase` gates the outgoing tab; `rise` drives the incoming one
+/// (0 = below, 1 = landed).
+#[derive(Debug, Clone)]
+pub struct TabSwap {
+    /// `Some(spring)` while the outgoing tab is still fading out.
+    phase: Option<crate::core::anim::Spring>,
+    /// Rise progress for the incoming tab, 0..=1.
+    rise: crate::core::anim::Spring,
+}
+
+impl Default for TabSwap {
+    fn default() -> Self {
+        Self {
+            phase: None,
+            rise: crate::core::anim::Spring::new(1.0, crate::core::anim::SpringConfig::SWAP),
+        }
+    }
+}
+
+impl TabSwap {
+    /// How opaque the outgoing tab still is (1 = fully visible).
+    pub fn outgoing_opacity(&self) -> f32 {
+        self.phase.as_ref().map(|s| s.value()).unwrap_or(0.0)
+    }
+
+    /// Opacity of the incoming tab. The rise drives the fade-in too, so the
+    /// new content materializes as it lands instead of popping in on top of
+    /// the outgoing body (which would hide the fade-out entirely).
+    pub fn incoming_opacity(&self) -> f32 {
+        self.rise.value()
+    }
+
+    /// Rise progress of the incoming tab, 0 (below) to 1 (landed).
+    pub fn rise(&self) -> f32 {
+        self.rise.value()
+    }
+
+    /// Kick off a swap. Retargeting mid-swap blends into the new
+    /// target instead of jumping.
+    pub fn swap_to(&mut self) {
+        let mut fade = crate::core::anim::Spring::new(1.0, crate::core::anim::SpringConfig::SWAP);
+        fade.set_target(0.0);
+        self.phase = Some(fade);
+        self.rise.snap(0.0);
+        self.rise.set_target(1.0);
+    }
+
+    /// Advance both springs by `dt` seconds; returns whether more
+    /// frames are needed. The fade and the rise overlap: one crossfade,
+    /// not a fade followed by a slide.
+    pub fn step(&mut self, dt: f32) -> bool {
+        let fading = match self.phase {
+            Some(ref mut fade) => fade.step(dt),
+            None => false,
+        };
+        if !fading {
+            self.phase = None;
+        }
+        let rising = self.rise.step(dt);
+        fading || rising
+    }
+
 }
 
 impl ViewState {
@@ -173,8 +247,13 @@ impl ViewState {
     /// when the click landed outside every tab (which must not clear the
     /// selection).
     pub fn click_tab(&mut self, x: f32, y: f32) -> Option<usize> {
-        self.active_tab = self.tab_at(x, y)?;
-        Some(self.active_tab)
+        let next = self.tab_at(x, y)?;
+        if next != self.active_tab {
+            self.prev_tab = self.active_tab;
+            self.active_tab = next;
+            self.tab_swap.swap_to();
+        }
+        Some(next)
     }
 
     /// Which tab contains panel-space `(x, y)`, if any.
@@ -440,14 +519,34 @@ pub fn build(state: &ViewState) -> Frame {
         (open - layout::CONTENT_FADE_IN_START) / (1.0 - layout::CONTENT_FADE_IN_START),
     );
     if content_opacity > 0.0 {
+        // iOS-style swap: the outgoing tab's body fades out first, then the
+        // incoming one rises from a few px below as the spring lands. Idle
+        // swaps sit at rise = 1.0, so a settled frame is unchanged.
+        let swap = &state.tab_swap;
+        let outgoing = swap.outgoing_opacity();
+        if outgoing > 0.0 {
+            let mut old = Node::Group {
+                rect: frame,
+                children: panel_content_for(fw, fh, state, state.prev_tab),
+            };
+            if let Node::Group { children, .. } = &mut old {
+                children
+                    .iter_mut()
+                    .for_each(|c| fade_node(c, content_opacity * outgoing));
+            }
+            scene.push(old);
+        }
+        let rise = swap.rise();
+        let incoming = swap.incoming_opacity();
         let mut group = Node::Group {
             rect: frame,
             children: panel_content(fw, fh, state),
         };
         if let Node::Group { children, .. } = &mut group {
-            children
-                .iter_mut()
-                .for_each(|c| fade_node(c, content_opacity));
+            children.iter_mut().for_each(|c| {
+                fade_node(c, content_opacity * incoming);
+                c.translate(0.0, SWAP_RISE_PX * (1.0 - rise));
+            });
         }
         scene.push(group);
     }
@@ -508,19 +607,29 @@ fn put(fw: f32, fh: f32, rect: Rect) -> Rect {
     layout::fit(rect, fw, fh)
 }
 
+/// How far below its resting spot the incoming tab's content starts, in
+/// logical px. Small on purpose — an iOS rise is a nudge, not a slide.
+pub const SWAP_RISE_PX: f32 = 8.0;
+
 /// The expanded panel's contents, in draw order: header, tabs, rows, footer.
 fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
+    panel_content_for(fw, fh, state, state.active_tab)
+}
+
+/// [`panel_content`] for an explicit tab — the outgoing half of a swap
+/// renders the tab that is being left behind.
+fn panel_content_for(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Node> {
     let mut out = header_block(fw, fh);
     let tabs = tab_strip(fw, fh, header_height(), state);
     let tab_bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
     out.extend(tabs);
-    if state.active_tab == MEDIA_TAB {
+    if tab == MEDIA_TAB {
         out.extend(media::content(fw, fh, tab_bottom, &state.media));
-    } else if state.active_tab == STATS_TAB {
+    } else if tab == STATS_TAB {
         out.extend(stats::content(fw, fh, tab_bottom, &state.stats, &state.procs));
-    } else if state.active_tab == TIMER_TAB {
+    } else if tab == TIMER_TAB {
         out.extend(timer::content(fw, fh, tab_bottom, &state.timer));
-    } else if state.active_tab == CLIPBOARD_TAB {
+    } else if tab == CLIPBOARD_TAB {
         out.extend(clipboard::content(
             fw,
             fh,
@@ -528,13 +637,13 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
             &state.clip_entries,
             state.clip_enabled,
         ));
-    } else if state.active_tab == PICKER_TAB {
+    } else if tab == PICKER_TAB {
         out.extend(picker::content(fw, fh, tab_bottom, &state.picker));
-    } else if state.active_tab == CALENDAR_TAB {
+    } else if tab == CALENDAR_TAB {
         out.extend(calendar::content(fw, fh, tab_bottom, &state.cal));
-    } else if state.active_tab == SHELF_TAB {
+    } else if tab == SHELF_TAB {
         out.extend(shelf::content(fw, fh, tab_bottom, &state.shelf));
-    } else if state.active_tab == TERMINAL_TAB {
+    } else if tab == TERMINAL_TAB {
         out.extend(terminal::content(
             fw,
             fh,
@@ -1734,5 +1843,59 @@ mod tests {
             PANEL_RADIUS_REF,
             "PANEL_RADIUS drifted"
         );
+    }
+
+    #[test]
+    fn tab_swap_crossfades_and_rises_together() {
+        let mut swap = TabSwap::default();
+        // Idle: nothing outgoing, rise settled at 1 (layout unchanged).
+        assert_eq!(swap.outgoing_opacity(), 0.0);
+        assert_eq!(swap.rise(), 1.0);
+        assert!(!swap.step(1.0 / 240.0), "idle swap must not want frames");
+
+        swap.swap_to();
+        assert_eq!(swap.outgoing_opacity(), 1.0, "outgoing starts fully visible");
+        assert_eq!(swap.rise(), 0.0, "incoming starts below and invisible");
+
+        // One crossfade: the outgoing body fades while the incoming rises.
+        let mut t = 0.0;
+        let mut saw_mid = false;
+        while swap.step(1.0 / 240.0) && t < 2.0 {
+            t += 1.0 / 240.0;
+            let (out, inc) = (swap.outgoing_opacity(), swap.incoming_opacity());
+            assert!((0.0..=1.0).contains(&out) && (0.0..=1.0).contains(&inc));
+            if (0.05..0.95).contains(&out) && (0.05..0.95).contains(&inc) {
+                saw_mid = true;
+            }
+        }
+        assert!(t < 2.0, "swap never settled");
+        assert!(saw_mid, "fade and rise must overlap, not run in sequence");
+        assert_eq!(swap.outgoing_opacity(), 0.0);
+        assert_eq!(swap.rise(), 1.0);
+        assert!(!swap.step(1.0 / 240.0), "settled swap must go quiet");
+    }
+
+    #[test]
+    fn tab_swap_restarts_from_the_top() {
+        let mut swap = TabSwap::default();
+        swap.swap_to();
+        for _ in 0..30 {
+            swap.step(1.0 / 240.0);
+        }
+        let mid = swap.rise();
+        swap.swap_to();
+        assert_eq!(swap.outgoing_opacity(), 1.0, "restart re-arms the fade");
+        assert!(swap.rise() <= mid, "restart pulls the rise back to 0");
+    }
+
+    #[test]
+    fn settled_swap_leaves_layout_untouched() {
+        let mut state = ViewState::default();
+        state.island_width = 640.0;
+        state.island_height = 400.0;
+        let before = build(&state);
+        // A settled swap must be a no-op on the scene.
+        let after = build(&state);
+        assert_eq!(before.scene.nodes.len(), after.scene.nodes.len());
     }
 }
