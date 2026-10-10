@@ -548,6 +548,7 @@ pub fn build(state: &ViewState) -> Frame {
                 let p = stagger_progress(rise, i);
                 fade_node(c, content_opacity * p);
                 c.translate(0.0, SWAP_RISE_PX * (1.0 - p));
+                scale_about_top(c, 1.0 - SWAP_SCALE_DELTA * (1.0 - p));
             });
         }
         scene.push(group);
@@ -930,6 +931,32 @@ fn footer_block(fw: f32, fh: f32) -> Vec<Node> {
         text: FOOTER_CLOCK.to_string(),
         style,
     }]
+}
+
+/// How much smaller (as a fraction of height) incoming content starts
+/// its rise. A nudge — the iOS effect is scale you feel, not see.
+const SWAP_SCALE_DELTA: f32 = 0.03;
+
+/// Shrink every node in a subtree vertically by `factor`, keeping each
+/// node's centre fixed, so rows settle in place instead of sliding.
+/// Vertical only: a horizontal scale would distort icon glyphs.
+fn scale_about_top(node: &mut Node, factor: f32) {
+    let h = node.rect().h;
+    let dh = h * (1.0 - factor);
+    node.translate(0.0, dh / 2.0);
+    match node {
+        Node::RoundRect { rect, .. }
+        | Node::Text { rect, .. }
+        | Node::Image { rect, .. }
+        | Node::Bar { rect, .. }
+        | Node::Glyph { rect, .. }
+        | Node::Group { rect, .. } => rect.h = h * factor,
+    }
+    if let Node::Group { children, .. } = node {
+        for c in children.iter_mut() {
+            scale_about_top(c, factor);
+        }
+    }
 }
 
 /// Multiply a node's opacity by `opacity`, recursively.
@@ -1903,6 +1930,24 @@ mod tests {
         swap.swap_to();
         assert_eq!(swap.outgoing_opacity(), 1.0, "restart re-arms the fade");
         assert!(swap.rise() <= mid, "restart pulls the rise back to 0");
+    }
+
+    #[test]
+    fn scale_about_top_shrinks_to_center_and_restores() {
+        let mut n = Node::RoundRect {
+            rect: Rect::new(0.0, 100.0, 50.0, 40.0),
+            fill: Rgba::BLACK,
+            radii: CornerRadii::uniform(0.0),
+        };
+        scale_about_top(&mut n, 0.5);
+        let r = n.rect();
+        // Centre fixed: 100 + 20 -> 110 + 10.
+        assert!((r.h - 20.0).abs() < 1e-4, "h={}", r.h);
+        assert!((r.y - 110.0).abs() < 1e-4, "y={}", r.y);
+        // Factor of 1.0 must be a no-op (settled frames stay pixel-identical).
+        let before = format!("{:?}", n.rect());
+        scale_about_top(&mut n, 1.0);
+        assert_eq!(format!("{:?}", n.rect()), before);
     }
 
     #[test]
