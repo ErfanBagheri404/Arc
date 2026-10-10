@@ -537,15 +537,17 @@ pub fn build(state: &ViewState) -> Frame {
             scene.push(old);
         }
         let rise = swap.rise();
-        let incoming = swap.incoming_opacity();
         let mut group = Node::Group {
             rect: frame,
             children: panel_content(fw, fh, state),
         };
         if let Node::Group { children, .. } = &mut group {
-            children.iter_mut().for_each(|c| {
-                fade_node(c, content_opacity * incoming);
-                c.translate(0.0, SWAP_RISE_PX * (1.0 - rise));
+            children.iter_mut().enumerate().for_each(|(i, c)| {
+                // Staggered rise: each row starts a beat after the one above
+                // it, so the body cascades in instead of moving as a slab.
+                let p = stagger_progress(rise, i);
+                fade_node(c, content_opacity * p);
+                c.translate(0.0, SWAP_RISE_PX * (1.0 - p));
             });
         }
         scene.push(group);
@@ -610,6 +612,21 @@ fn put(fw: f32, fh: f32, rect: Rect) -> Rect {
 /// How far below its resting spot the incoming tab's content starts, in
 /// logical px. Small on purpose — an iOS rise is a nudge, not a slide.
 pub const SWAP_RISE_PX: f32 = 8.0;
+
+/// Fraction of the swap each successive row waits behind the one above it.
+/// Small: enough to read as a cascade, not enough to look like a queue.
+pub const SWAP_STAGGER: f32 = 0.07;
+
+/// Progress of child `index` given the swap's overall `rise` (0..=1).
+///
+/// Rows start in order, so row 0 leads and each later row trails by
+/// [`SWAP_STAGGER`]. Rows past the point where the stagger would eat the
+/// whole window share the last slot rather than never arriving.
+pub fn stagger_progress(rise: f32, index: usize) -> f32 {
+    let max_delay = 1.0 - SWAP_STAGGER;
+    let delay = (index as f32 * SWAP_STAGGER).min(max_delay);
+    ((rise - delay) / (1.0 - delay)).clamp(0.0, 1.0)
+}
 
 /// The expanded panel's contents, in draw order: header, tabs, rows, footer.
 fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
@@ -1886,6 +1903,28 @@ mod tests {
         swap.swap_to();
         assert_eq!(swap.outgoing_opacity(), 1.0, "restart re-arms the fade");
         assert!(swap.rise() <= mid, "restart pulls the rise back to 0");
+    }
+
+    #[test]
+    fn stagger_cascades_and_stays_in_range() {
+        // Row 0 leads: at rise 0 nothing has started, at 1 everything landed.
+        assert_eq!(stagger_progress(0.0, 0), 0.0);
+        assert_eq!(stagger_progress(1.0, 0), 1.0);
+        // A later row trails an earlier one at the same instant.
+        let mid = 0.5;
+        assert!(stagger_progress(mid, 1) < stagger_progress(mid, 0));
+        assert!(stagger_progress(mid, 4) < stagger_progress(mid, 1));
+        // Monotone in rise and bounded for every index, including absurd ones.
+        for i in [0usize, 1, 7, 1000] {
+            let mut last = -1.0;
+            for step in 0..=100 {
+                let p = stagger_progress(step as f32 / 100.0, i);
+                assert!((0.0..=1.0).contains(&p), "out of range at i={i} p={p}");
+                assert!(p >= last, "not monotone at i={i}");
+                last = p;
+            }
+            assert_eq!(stagger_progress(1.0, i), 1.0, "row {i} never lands");
+        }
     }
 
     #[test]
