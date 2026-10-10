@@ -14,6 +14,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use windows::core::{Error, Interface, BOOL, PCWSTR};
+use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
@@ -44,7 +45,8 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteTextFormat,
+    DWRITE_FACTORY_TYPE_SHARED, IDWriteFontCollection,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
     DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -54,6 +56,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
+
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_SCALING_STRETCH,
@@ -231,6 +234,10 @@ pub struct Renderer {
     visual: Option<IDCompositionVisual>,
     d2d_factory: Option<ID2D1Factory>,
     dwrite: Option<IDWriteFactory>,
+    /// Collection holding the bundled proportional face. `None` when the
+    /// asset is missing or the font stack could not be built; the family
+    /// chain then falls through to the system fonts.
+    font_collection: Option<IDWriteFontCollection>,
     formats: HashMap<FormatKey, IDWriteTextFormat>,
     /// WIC factory, built lazily on the first image draw. `None` until then, and
     /// permanently `None` if the platform has no imaging stack.
@@ -264,6 +271,7 @@ impl Renderer {
             visual: None,
             d2d_factory: None,
             dwrite: None,
+            font_collection: None,
             formats: HashMap::new(),
             wic: None,
             images: HashMap::new(),
@@ -386,6 +394,16 @@ impl Renderer {
             DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
         });
 
+        // Inter, bundled (OFL): Apple's SF faces ship under a licence that
+        // forbids redistribution, so the stack's reference font is a
+        // stand-in. Held in its own collection rather than registered with
+        // the system, so nothing leaks outside this process.
+        let font_collection = dwrite
+            .cast::<IDWriteFactory5>()
+            .ok()
+            .and_then(|f| bundled_collection(&f));
+
+        self.font_collection = font_collection;
         self.swapchain = Some(swapchain);
         self.dcomp = Some(dcomp);
         self.dcomp_target = Some(dcomp_target);
@@ -735,27 +753,35 @@ impl Renderer {
         // "Segoe UI Variable Display" is absent on some Win10/11 SKUs, and a
         // missing family fails the whole CreateTextFormat call -- so walk down
         // to plain Segoe UI instead of rendering nothing.
+        // Proportional runs resolve against the bundled collection so
+        // "Inter" is found; the mono chain stays on the system set.
         // DirectWrite rejects a null locale name with E_INVALIDARG, so the
         // locale has to be a real, empty-terminated string even when we want the
         // user default.
         let locale = wide("");
         let mut last_err = None;
         let mut format = None;
-        // The terminal grid needs a fixed-pitch family; the fallback
-        // chain mirrors the proportional one (absent SKU → plain).
-        let families: [&str; 4] = if style.mono {
-            ["Cascadia Mono", "Cascadia Code", "Consolas", "Courier New"]
+        // Inter resolves only through the bundled collection; when that
+        // build failed the family chain starts at Segoe UI so every run
+        // still gets a real format.
+        let families: [&str; 5] = if style.mono {
+            ["Cascadia Mono", "Cascadia Code", "Consolas", "Courier New", "Arial"]
+        } else if self.font_collection.is_some() {
+            ["Inter", "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Segoe UI"]
         } else {
-            // Fourth slot unused on the proportional path: DWrite resolves the
-            // first three, and "Segoe UI" ships on every SKU.
-            ["Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Segoe UI"]
+            ["Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Segoe UI", "Segoe UI"]
+        };
+        let collection = if style.mono {
+            None
+        } else {
+            self.font_collection.as_ref()
         };
         for family_name in families {
             let family = wide(family_name);
             match unsafe {
                 factory.CreateTextFormat(
                     PCWSTR(family.as_ptr()),
-                    None,
+                    collection,
                     windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT(key.weight),
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
@@ -815,6 +841,40 @@ impl Renderer {
     }
 }
 
+/// Build a DirectWrite collection holding just the bundled face.
+///
+/// GDI's `AddFontResourceExW(FR_PRIVATE)` and `AddFontMemResourceEx` are
+/// the obvious route, but DirectWrite's system collection does not surface
+/// process-private fonts, so `CreateTextFormat(.., None, ..)` never resolves
+/// the family. A font set built from the file and wrapped in its own
+/// collection is the supported path, and it keeps the face out of the
+/// system-wide namespace.
+/// Needs Factory5 for the builder that accepts a font file (Factory3's
+/// builder only takes face references and existing sets).
+fn bundled_collection(factory: &IDWriteFactory5) -> Option<IDWriteFontCollection> {
+    // ponytail: path is relative to the process CWD; packaging should embed
+    // the bytes and use an in-memory font file loader instead.
+    let path = std::fs::canonicalize("assets/fonts/Inter.ttf").ok()?;
+    let wpath: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: every handle is an owned COM reference kept alive by the
+    // returned collection; `wpath` outlives the call.
+    unsafe {
+        let file = factory.CreateFontFileReference(PCWSTR(wpath.as_ptr()), None).ok()?;
+        let builder = factory.CreateFontSetBuilder().ok()?;
+        builder.AddFontFile(&file).ok()?;
+        let set = builder.CreateFontSet().ok()?;
+        factory
+            .CreateFontCollectionFromFontSet(&set)
+            .ok()?
+            .cast()
+            .ok()
+    }
+}
+
 /// Convert a scene rect to the D2D float rect. Shared by text and image drawing
 /// so both hit the same bounds.
 fn to_rect(rect: Rect) -> D2D_RECT_F {
@@ -855,6 +915,26 @@ mod tests {
                 })
                 .clone(),
         }
+    }
+
+    /// The bundled face is the whole point of the asset: if the collection
+    /// cannot resolve "Inter", every proportional run silently falls back to
+    /// Segoe UI and the app loses its reference look with no other symptom.
+    #[test]
+    fn bundled_inter_is_visible_to_directwrite() {
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
+            .expect("dwrite factory");
+        let factory5 = factory.cast::<IDWriteFactory5>().expect("factory5");
+        let collection = bundled_collection(&factory5).expect("bundled collection");
+
+        let name = wide("Inter");
+        let (mut index, mut exists) = (0u32, windows::core::BOOL(0));
+        unsafe {
+            collection
+                .FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists)
+                .expect("FindFamilyName");
+        }
+        assert!(exists.as_bool(), "bundled collection must expose Inter");
     }
 
     #[test]
