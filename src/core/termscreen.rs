@@ -38,7 +38,7 @@ impl Cell {
 ///
 /// `Clone` because the platform layer snapshots it for the frame draw while the
 /// reader thread keeps feeding the original.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Screen {
     /// Live viewport, row 0 at top.
     grid: Vec<Vec<Cell>>,

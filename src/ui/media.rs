@@ -185,6 +185,7 @@ fn fmt_total(total_secs: f32, dur: Option<std::time::Duration>) -> String {
 /// Empty state: a dimmed placeholder line telling the user nothing is playing.
 fn empty(fw: f32, fh: f32) -> Vec<Node> {
     let style = TextStyle {
+        mono: false,
         size: 14.0,
         weight: Weight::Regular,
         color: DIM,

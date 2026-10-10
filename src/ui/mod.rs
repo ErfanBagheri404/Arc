@@ -30,6 +30,7 @@ pub mod picker;
 pub mod media;
 pub mod stats;
 pub mod timer;
+pub mod terminal;
 pub mod text;
 
 pub use text::{line_height, measure};
@@ -38,8 +39,8 @@ pub use text::{line_height, measure};
 pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
-pub const TABS: [&str; 8] = [
-    "Media", "Stats", "Timer", "Clipboard", "Color", "Usage", "Calendar", "Shelf",
+pub const TABS: [&str; 9] = [
+    "Media", "Stats", "Timer", "Clipboard", "Color", "Usage", "Calendar", "Shelf", "Terminal",
 ];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
@@ -100,6 +101,7 @@ const PILL_AMBER: Rgba = Rgba::rgb(0.95, 0.62, 0.11);
 /// Tab label style: 12 px regular, dimmed grey (the reference rests on
 /// white/grey, with a single album-art accent appearing elsewhere in the shell).
 const TAB_LABEL: TextStyle = TextStyle {
+    mono: false,
     size: 12.0,
     weight: Weight::Regular,
     color: Rgba {
@@ -155,6 +157,11 @@ pub struct ViewState {
     pub shelf: Vec<crate::services::shelf::Item>,
     /// Calendar subscriptions plus upcoming events.
     pub cal: crate::services::calendars::Snapshot,
+    /// The terminal grid, snapshotted by the app thread from the terminal
+    /// service each frame (same rule as `media`: `build` stays pure).
+    pub terminal: Option<crate::core::termscreen::Screen>,
+    /// Why the shell failed to start, if it did. Shown instead of the grid.
+    pub terminal_error: Option<String>,
 }
 
 impl ViewState {
@@ -296,7 +303,7 @@ impl ViewState {
     ///
     /// Same threshold as content emission: whatever the user cannot see cannot
     /// be hovered or clicked.
-    fn content_visible(&self) -> bool {
+    pub fn content_visible(&self) -> bool {
         openness(self.island_width, self.island_height) > layout::CONTENT_FADE_IN_START
     }
 }
@@ -527,6 +534,14 @@ fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
         out.extend(calendar::content(fw, fh, tab_bottom, &state.cal));
     } else if state.active_tab == SHELF_TAB {
         out.extend(shelf::content(fw, fh, tab_bottom, &state.shelf));
+    } else if state.active_tab == TERMINAL_TAB {
+        out.extend(terminal::content(
+            fw,
+            fh,
+            tab_bottom,
+            state.terminal.as_ref(),
+            state.terminal_error.as_deref(),
+        ));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -548,6 +563,8 @@ pub const CALENDAR_TAB: usize = 6;
 pub const SHELF_TAB: usize = 7;
 /// The Usage tab — still the generic placeholder rows.
 pub const USAGE_TAB: usize = 5;
+/// The Terminal tab — the ConPTY grid.
+pub const TERMINAL_TAB: usize = 8;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -1321,7 +1338,7 @@ mod tests {
     fn panel_frame_contains_eight_tabs_with_8px_gaps() {
         let f = panel();
         let rects = glyph_rects(&f);
-        assert_eq!(rects.len(), 8, "expected eight tabs: {:#?}", f.scene.nodes);
+        assert_eq!(rects.len(), TABS.len(), "expected every tab: {:#?}", f.scene.nodes);
         for w in rects.windows(2) {
             assert!(w[0].max_x() <= w[1].x + 1e-4, "tabs overlap: {w:?}");
             assert!(
