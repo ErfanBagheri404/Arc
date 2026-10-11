@@ -65,7 +65,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows_numerics::Matrix3x2;
 
-use crate::core::geom::{squircle_segments, CornerRadii, Rect, Rgba};
+use crate::core::geom::{notch_metrics, squircle_segments, CornerRadii, Rect, Rgba};
 use crate::core::imagedb;
 use crate::core::scene::{Align, Frame, ImageHandle, Node, TextStyle, Weight};
 
@@ -136,6 +136,19 @@ fn format_key(style: &TextStyle) -> FormatKey {
 /// start of the matching segment in [`squircle_segments`], or the outline closes
 /// with visible kinks between corners.
 fn corner_start(rect: &Rect, radii: CornerRadii, index: usize) -> (f32, f32) {
+    // A negative top radius is the concave wing, which moves the body's sides
+    // inward and reorders the segments: index 0 is the top-right wing (its
+    // only predecessor being the top edge), and the body's left side comes
+    // last. `notch_metrics` is the one source of truth for that geometry.
+    if radii.top_left < 0.0 || radii.top_right < 0.0 {
+        let (body_l, body_r, bl, br, wl, _wr) = notch_metrics(rect, radii);
+        return match index {
+            0 => (rect.max_x(), rect.y),
+            1 => (body_r, rect.max_y() - br),
+            2 => (body_l + bl, rect.max_y()),
+            _ => (body_l, rect.y + wl),
+        };
+    }
     match index {
         0 => (rect.x + radii.top_left, rect.y),
         1 => (rect.x, rect.max_y() - radii.bottom_left),

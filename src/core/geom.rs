@@ -141,13 +141,26 @@ impl CornerRadii {
     }
 
     /// Clamp every radius to what the rect can actually render (half the short side).
+    /// Fit every radius to what the rect can actually render.
+    ///
+    /// A negative radius is not an error: it marks a *concave* corner — the
+    /// wing/ear curve that sweeps from the screen edge into the body's side,
+    /// as in DynamicNotch's `NotchShape`. The sign is preserved and only the
+    /// magnitude is clamped, because "round outward" and "swoop inward" are
+    /// different shapes sharing one field.
     pub fn clamped(self, w: f32, h: f32) -> Self {
         let m = (w.min(h) / 2.0).max(0.0);
+        fn fit(v: f32, m: f32) -> f32 {
+            match v.partial_cmp(&0.0) {
+                Some(std::cmp::Ordering::Less) => -v.abs().min(m),
+                _ => v.clamp(0.0, m),
+            }
+        }
         Self {
-            top_left: self.top_left.clamp(0.0, m),
-            top_right: self.top_right.clamp(0.0, m),
-            bottom_right: self.bottom_right.clamp(0.0, m),
-            bottom_left: self.bottom_left.clamp(0.0, m),
+            top_left: fit(self.top_left, m),
+            top_right: fit(self.top_right, m),
+            bottom_right: fit(self.bottom_right, m),
+            bottom_left: fit(self.bottom_left, m),
         }
     }
 }
@@ -174,7 +187,69 @@ pub struct PathSegment {
 /// Build the outline of `rect` with continuous (squircle) corners as cubic Béziers.
 /// Four segments, clockwise from the top-left corner.
 #[allow(clippy::vec_init_then_push)]
+/// Geometry of the DynamicNotch silhouette: a body inset by concave top
+/// wings that flare out to the frame's top corners. Returns
+/// `(body_left, body_right, bottom_left_r, bottom_right_r, wing_l, wing_r)`.
+pub fn notch_metrics(rect: &Rect, radii: CornerRadii) -> (f32, f32, f32, f32, f32, f32) {
+    // A wing can't scoop deeper than the frame's height or wider than half
+    // the frame, or the two wings would cross.
+    let wing = |v: f32| (-v).max(0.0).min(rect.h).min(rect.w / 2.0);
+    let (wl, wr) = (wing(radii.top_left), wing(radii.top_right));
+    let body_left = rect.x + wl;
+    let body_right = rect.max_x() - wr;
+    let body_w = (body_right - body_left).max(0.0);
+    let m = (rect.h / 2.0).min(body_w / 2.0);
+    let bl = radii.bottom_left.max(0.0).min(m);
+    let br = radii.bottom_right.max(0.0).min(m);
+    (body_left, body_right, bl, br, wl, wr)
+}
+
+/// The notch outline: clockwise from the frame's top-right corner —
+/// TR wing down to the body's right side, bottom-right, bottom, bottom-left,
+/// up the body's left side, TL wing back to the frame's top-left corner.
+/// The implicit lines between segments are the body's sides and the top edge
+/// along the screen. Same chaining contract as `squircle_segments`.
+#[allow(clippy::vec_init_then_push)]
+fn notch_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
+    let (body_l, body_r, bl, br, wl, wr) = notch_metrics(rect, radii);
+    let (y, max_y) = (rect.y, rect.max_y());
+    let c = SQUIRCLE_C;
+    let mut segs = Vec::with_capacity(4);
+
+    // TR wing: (max_x, y) → (body_r, y + wr). Cubic of the Swift quadratic
+    // with control on the top edge — tangent horizontal at the screen corner,
+    // vertical where it meets the body's side.
+    segs.push(PathSegment {
+        c1: (rect.max_x() - wr * 2.0 / 3.0, y),
+        c2: (body_r, y + wr / 3.0),
+        to: (body_r, y + wr),
+    });
+    // Bottom-right on the body's own extent.
+    segs.push(PathSegment {
+        c1: (body_r, max_y - br * (1.0 - c)),
+        c2: (body_r - br * (1.0 - c), max_y),
+        to: (body_r - br, max_y),
+    });
+    // Bottom-left on the body's own extent.
+    segs.push(PathSegment {
+        c1: (body_l + bl * (1.0 - c), max_y),
+        c2: (body_l, max_y - bl * (1.0 - c)),
+        to: (body_l, max_y - bl),
+    });
+    // TL wing: (body_l, y + wl) → (rect.x, y), mirroring the TR wing.
+    segs.push(PathSegment {
+        c1: (body_l, y + wl / 3.0),
+        c2: (rect.x + wl * 2.0 / 3.0, y),
+        to: (rect.x, y),
+    });
+
+    segs
+}
+
 pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
+    if radii.top_left < 0.0 || radii.top_right < 0.0 {
+        return notch_segments(rect, radii);
+    }
     let r = radii.clamped(rect.w, rect.h);
     let (x, y) = (rect.x, rect.y);
     let (max_x, max_y) = (rect.max_x(), rect.max_y());
@@ -242,8 +317,65 @@ mod tests {
     fn radii_clamp_to_half_short_side() {
         let r = CornerRadii::uniform(500.0).clamped(40.0, 32.0);
         assert_eq!(r.top_left, 16.0);
+        // A negative radius is the concave wing notch: the clamp bounds its
+        // magnitude, never its sign, or the wing would invert into a bulge.
         let r2 = CornerRadii::uniform(-5.0).clamped(40.0, 32.0);
-        assert_eq!(r2.bottom_right, 0.0);
+        assert_eq!(r2.bottom_right, -5.0);
+        let r3 = CornerRadii::uniform(-40.0).clamped(40.0, 32.0);
+        assert_eq!(r3.bottom_right, -16.0);
+    }
+
+    #[test]
+    fn notch_wings_scoop_from_the_frame_corners_into_the_body_sides() {
+        // The silhouette is one figure: each wing leaves the frame's own
+        // top corner tangent to the screen edge, curves in, and lands on the
+        // body's side — which is inset by exactly the wing's width.
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let radii = CornerRadii {
+            top_left: -20.0,
+            top_right: -20.0,
+            bottom_left: 8.0,
+            bottom_right: 8.0,
+        };
+        let segs = squircle_segments(&rect, radii);
+        assert_eq!(segs.len(), 4);
+        // Order: TR wing, BR, BL, TL wing.
+        assert_eq!(segs[0].to, (80.0, 20.0), "TR wing lands on the body side");
+        assert_eq!(segs[3].to, (0.0, 0.0), "TL wing returns to the frame corner");
+        // Tangent horizontal at the screen edge, vertical on the body side.
+        assert_eq!(segs[0].c1.1, rect.y);
+        assert_eq!(segs[0].c2.0, 80.0);
+        // Bottom corners ride the inset body, not the full frame: BR ends on
+        // the bottom edge, BL ends where the body's left side begins.
+        assert_eq!(segs[1].to, (72.0, 40.0));
+        assert_eq!(segs[2].to, (20.0, 32.0));
+    }
+
+    #[test]
+    fn notch_wings_cannot_cross_or_exceed_the_frame() {
+        // A wing deeper than the height, or wider than half the frame, would
+        // invert the silhouette.
+        let rect = Rect::new(0.0, 0.0, 30.0, 10.0);
+        let radii = CornerRadii {
+            top_left: -500.0,
+            top_right: -500.0,
+            bottom_left: 16.0,
+            bottom_right: 16.0,
+        };
+        let (body_l, body_r, bl, br, wl, wr) = notch_metrics(&rect, radii);
+        assert!(body_l <= body_r, "wings must not cross: {body_l} > {body_r}");
+        assert_eq!(wl, wr);
+        assert!(bl >= 0.0 && br >= 0.0);
+        let segs = squircle_segments(&rect, radii);
+        for s in &segs {
+            for (px, py) in [s.c1, s.c2, s.to] {
+                assert!(
+                    px >= rect.x - 1e-3 && px <= rect.max_x() + 1e-3,
+                    "control escaped: {px}"
+                );
+                assert!(py >= rect.y - 1e-3 && py <= rect.max_y() + 1e-3, "escaped: {py}");
+            }
+        }
     }
 
     #[test]

@@ -257,6 +257,7 @@ pub fn run() -> std::process::ExitCode {
         overlay.dpi().snap(state.logical_height()),
     );
     view.island_width = state.logical_width();
+        
     view.island_height = state.logical_height();
     let frame = ui::build(&view);
     renderer.present(&frame, overlay.dpi().scale, 0.0);
@@ -268,7 +269,9 @@ pub fn run() -> std::process::ExitCode {
         // The persistent view must carry the current geometry: this iteration's
         // clicks are hit-tested against it.
         view.island_width = state.logical_width();
+        
         view.island_height = state.logical_height();
+        
         for event in overlay.pump_events() {
             match event {
                 Event::ToggleIsland => state.toggle(),
@@ -557,6 +560,7 @@ pub fn run() -> std::process::ExitCode {
                 overlay.dpi().snap(state.logical_height()),
             );
             view.island_width = state.logical_width();
+        
             view.island_height = state.logical_height();
             let frame = ui::build(&view);
             renderer.present(&frame, overlay.dpi().scale, dt.as_secs_f32());

@@ -119,6 +119,8 @@ const TAB_LABEL: TextStyle = TextStyle {
 #[derive(Debug, Clone, Default)]
 pub struct ViewState {
     pub island_width: f32,
+    /// Window frame width = island_width + 2*EAR_W. Ears extend past the body.
+  // window size = body + ear wings
     pub island_height: f32,
     /// Index into [`TABS`] of the selected tab.
     pub active_tab: usize,
@@ -414,24 +416,22 @@ pub fn build(state: &ViewState) -> Frame {
 
     let mut scene = Scene::new();
 
-    // 1. The body. Always emitted, always the whole frame, always pure black and
-    //    opaque. This is the whole look. The island hangs flush from the top
-    //    edge; all four corners carry the iOS continuous-corner radius for the
-    //    pill-like Atoll shape with decorative "shoulders" at the top.
+    // 1. The body. One shape, DynamicNotch's NotchStyle: the silhouette starts
+    //    at the window's top corner, sweeps inward along a concave wing curve
+    //    (negative radius), drops down the side, rounds along the bottom with
+    //    the iOS continuous corner, and mirrors on the right. The wings and the
+    //    body are one figure, so the ears stay in sync at every morph state.
     scene.push(Node::RoundRect {
         rect: frame,
-        radii: CornerRadii::uniform(radius).clamped(fw, fh),
+        radii: CornerRadii {
+            top_left: -layout::EAR_W,
+            top_right: -layout::EAR_W,
+            bottom_left: radius,
+            bottom_right: radius,
+        }
+        .clamped(fw, fh),
         fill: Rgba::BLACK,
     });
-    // 1b. Atoll top-corner wings. The island hangs from the screen's top edge, so
-    //     its silhouette there is two outward arcs that sweep from the edge down
-    //     into the body's straight sides. The body already fills the frame, so
-    //     the wing is drawn by *carving* the corner away: a black-free wedge is
-    //     impossible in an opaque black body, and the real effect is achieved by
-    //     rounding the top pair to the same radius as the bottom. See
-    //     [`Node::RoundRect`] above — the top-left and top-right arcs are the
-    //     wings, and they hold the same radius in both states so the morph keeps
-    //     them in sync.
 
     // A zero-sized island emits nothing else: there is nothing to lay out inside,
     // and any rect could only escape the frame bounds.
@@ -1438,13 +1438,14 @@ mod tests {
 
     #[test]
     fn body_corners_are_all_ios_rounded() {
-        // All four corners carry the iOS continuous-corner radius; the Atoll
-        // shoulders sit on top of the rounded top corners.
+        // Top corners are the constant concave wings (-EAR_W); bottoms carry
+        // the iOS continuous radius.
         let Node::RoundRect { radii, .. } = &collapsed().scene.nodes[0] else {
             panic!()
         };
-        assert_eq!(radii.top_left, PILL_RADIUS_REF);
-        assert_eq!(radii.top_right, PILL_RADIUS_REF);
+        // The clamp caps the wing at half the pill height (16 at h=32).
+        assert_eq!(radii.top_left, -(layout::EAR_W.min(PILL_H_REF / 2.0)));
+        assert_eq!(radii.top_right, -(layout::EAR_W.min(PILL_H_REF / 2.0)));
         assert_eq!(radii.bottom_left, PILL_RADIUS_REF);
         assert_eq!(radii.bottom_right, PILL_RADIUS_REF);
         assert_eq!(PILL_RADIUS_REF, 16.0);
@@ -1452,17 +1453,20 @@ mod tests {
 
     #[test]
     fn expanded_body_keeps_its_corners_rounded_too() {
-        // The panel morph keeps all four corners rounded uniformly, and the
-        // radius grows from pill 16 -> panel 36.
+        // The panel morph: top corners stay at the constant wing notch, bottom
+        // corners grow from pill 16 -> panel 36.
         for open in [0.0f32, 0.5, 1.0] {
             let f = build(&view_sized(width_at(open), height_at(open)));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
-            assert_eq!(radii.top_left, radii.top_right, "top uniform at {open}");
-            assert_eq!(radii.bottom_left, radii.bottom_right, "bottom uniform at {open}");
-            assert_eq!(radii.top_left, radii.bottom_left, "all four uniform at {open}");
-            assert!(radii.top_left > 0.0, "rounded at {open}");
+            let h = height_at(open);
+            let notch = layout::EAR_W.min(h / 2.0);
+            assert_eq!(radii.top_left, -notch, "wing notch at {open}");
+            assert_eq!(radii.top_right, -notch, "wing notch at {open}");
+            let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
+            assert!((radii.bottom_left - want).abs() < 1e-3, "bottom_left at {open}");
+            assert!((radii.bottom_right - want).abs() < 1e-3, "bottom_right at {open}");
         }
     }
 
@@ -1733,9 +1737,8 @@ mod tests {
 
     #[test]
     fn radius_lerps_16_to_36_across_the_morph() {
-        // All four corners carry the same radius (iOS style) and track
-        // openness together: the corners hold the same value as each other at
-        // every point of the morph.
+        // Top corners are the constant wing notch; bottom corners track
+        // openness 16 -> 36 monotonically.
         let mut prev = -1.0;
         for i in 0..=100 {
             let open = i as f32 / 100.0;
@@ -1744,6 +1747,8 @@ mod tests {
                 panic!()
             };
             let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
+            assert_eq!(radii.top_left, -layout::EAR_W, "wing notch at {open}");
+            assert_eq!(radii.top_right, -layout::EAR_W, "wing notch at {open}");
             assert!(
                 (radii.bottom_left - want).abs() < 1e-3,
                 "at {open}: {:?}",
@@ -1754,8 +1759,6 @@ mod tests {
                 "at {open}: {:?}",
                 radii
             );
-            assert_eq!(radii.top_left, radii.bottom_left, "uniform at {open}");
-            assert_eq!(radii.top_right, radii.bottom_right, "uniform at {open}");
             assert!(radii.bottom_left >= prev, "radius dipped at {open}");
             prev = radii.bottom_left;
         }
