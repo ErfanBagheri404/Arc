@@ -14,7 +14,7 @@ pub const PANEL_W_REF: f32 = 640.0;
 /// Collapsed pill corner radius, mirrored from `app::state::PILL_RADIUS`.
 pub const PILL_RADIUS_REF: f32 = 16.0;
 /// Expanded panel corner radius, mirrored from `app::state::PANEL_RADIUS`.
-pub const PANEL_RADIUS_REF: f32 = 28.0;
+pub const PANEL_RADIUS_REF: f32 = 36.0;
 
 /// Collapsed pill height, mirrored from `app::state::PILL_H`.
 pub const PILL_H_REF: f32 = 32.0;
@@ -183,10 +183,10 @@ mod tests {
     }
 
     #[test]
-    fn radius_lerps_16_to_28() {
+    fn radius_lerps_16_to_36() {
         assert!((island_radius(0.0) - 16.0).abs() < 1e-6);
-        assert!((island_radius(1.0) - 28.0).abs() < 1e-6);
-        assert!((island_radius(0.5) - 22.0).abs() < 1e-6);
+        assert!((island_radius(1.0) - 36.0).abs() < 1e-6);
+        assert!((island_radius(0.5) - 26.0).abs() < 1e-6);
         // Monotonic across the whole range.
         let mut prev = -1.0;
         for i in 0..=100 {

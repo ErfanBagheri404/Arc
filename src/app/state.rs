@@ -14,7 +14,7 @@ pub const PILL_H: f32 = 32.0;
 pub const PILL_RADIUS: f32 = 16.0;
 pub const PANEL_W: f32 = 640.0;
 pub const PANEL_H: f32 = 200.0;
-pub const PANEL_RADIUS: f32 = 28.0;
+pub const PANEL_RADIUS: f32 = 36.0;
 
 /// Dwell time before hover expands the island, in seconds (Phase 2, hover).
 /// Short enough to feel like a reaction, long enough not to fire on a mouse

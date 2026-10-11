@@ -152,9 +152,16 @@ impl CornerRadii {
     }
 }
 
-/// Squircle (continuous corner) coefficient. 1.0 = circular arcs, ~0.55 ≈ Apple's
-/// continuous curvature look, which is what the reference design renders.
-pub const SQUIRCLE_K: f32 = 0.55;
+/// Cubic-circle kappa: control-point distance for a *true circular* arc.
+const KAPPA: f32 = 0.552_284_8;
+
+/// Where the corner's Bézier control points sit, as a fraction of the radius.
+///
+/// The curve's mid-point sits at `sqrt(2) * r * (4-3c) / 8` from the rect corner.
+/// c=KAPPA (0.552) → 0.414r (flatter than you'd expect from "circular arc").
+/// Larger c → smaller distance → curve fills the corner more → rounder look.
+/// iOS continuous corners use ~0.9, giving 0.18r ≈ superellipse exponent 4.
+pub const SQUIRCLE_C: f32 = 0.9;
 
 /// One cubic Bézier segment of a rounded-rect outline.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,11 +178,7 @@ pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let r = radii.clamped(rect.w, rect.h);
     let (x, y) = (rect.x, rect.y);
     let (max_x, max_y) = (rect.max_x(), rect.max_y());
-    let k = SQUIRCLE_K;
-
-    // Circle approximation constant scaled by the squircle factor.
-    // Cubic-circle kappa (0.55228474983…) rounded to what f32 can actually hold.
-    let c = 0.552_284_8 * k;
+    let c = SQUIRCLE_C;
 
     // Four pushes with an exact matching capacity, each with its own comment
     // about which edge of the squircle it builds — clearer than an array of
@@ -260,6 +263,37 @@ mod tests {
                 s.to
             );
         }
+    }
+
+    #[test]
+    fn corner_curves_are_true_arcs_not_chamfers() {
+        // The mid-point of the bottom-right curve is where a "cut" corner shows
+        // itself: a flat chamfer sits *farther* from the rect corner than a
+        // circular arc, an iOS continuous corner sits closer. Measure it.
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let r = 16.0;
+        let segs = squircle_segments(&rect, CornerRadii::uniform(r));
+        // segs[2] is bottom-right: (max_x - r, max_y) → (max_x, max_y - r).
+        let s = segs[2];
+        let to = bezier_point(((rect.max_x() - r), rect.max_y()), s.c1, s.c2, s.to, 0.5);
+        let corner = (rect.max_x(), rect.max_y());
+        let d = ((to.0 - corner.0).powi(2) + (to.1 - corner.1).powi(2)).sqrt();
+        // iOS continuous corner (c=0.9): mid-point at sqrt(2)·r·(4-3c)/8 =
+        // 0.18·r ≈ 2.9 px from the corner. Farther = chamfered (cut off),
+        // much closer = squarer. Pin the iOS value.
+        let ios = r * std::f32::consts::SQRT_2 * (4.0 - 3.0 * SQUIRCLE_C) / 8.0;
+        assert!(
+            (d - ios).abs() < 0.02 * r,
+            "corner {d:.3} px from the rect corner; iOS lands at {ios:.3}"
+        );
+    }
+
+    /// Cubic Bézier at parameter `t`.
+    fn bezier_point(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+        let u = 1.0 - t;
+        let x = u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0;
+        let y = u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1;
+        (x, y)
     }
 
     #[test]
