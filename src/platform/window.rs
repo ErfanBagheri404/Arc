@@ -173,6 +173,10 @@ struct State {
     body_inset: i32,
     /// Live body width in client physical px (see `body_inset`).
     body_width: i32,
+    /// Live body height in client physical px (see `body_inset`). Without this
+    /// the hit-test would accept the whole 200px frame column, so the
+    /// transparent strip below the pill would silently eat desktop clicks.
+    body_height: i32,
 }
 
 impl Default for State {
@@ -181,6 +185,7 @@ impl Default for State {
             events: Vec::with_capacity(16),
             body_inset: 0,
             body_width: 0,
+            body_height: 0,
         }
     }
 }
@@ -214,6 +219,12 @@ fn click_body_inset(hwnd: HWND) -> i32 {
     unsafe { userdata(hwnd) }.map(|s| s.body_inset).unwrap_or(0)
 }
 
+fn click_body_height(hwnd: HWND) -> i32 {
+    unsafe { userdata(hwnd) }
+        .map(|s| s.body_height)
+        .unwrap_or(0)
+}
+
 fn click_body_width(hwnd: HWND) -> i32 {
     // Mirrors `pointer_over`: the live body width, centred in the fixed frame.
     unsafe { userdata(hwnd) }
@@ -231,6 +242,13 @@ fn client_origin(hwnd: HWND) -> (i32, i32) {
         return (0, 0);
     }
     (r.left, r.top)
+}
+
+/// Pure hit-test: is client point (`x`,`y`) inside the live body rect? The
+/// height bound matters: without it the transparent strip *below* the pill
+/// would swallow desktop clicks (the fixed frame is far taller than the pill).
+fn hit_body(x: i32, y: i32, inset: i32, width: i32, height: i32) -> bool {
+    x >= inset && x < inset + width && y >= 0 && y < height
 }
 
 /// `LPARAM`-packed client coordinates are a signed 16-bit pair.
@@ -491,9 +509,13 @@ unsafe extern "system" fn wnd_proc(
             let (sx, sy) = lparam_xy(lparam);
             let origin = client_origin(hwnd);
             let (x, y) = (sx as i32 - origin.0, sy as i32 - origin.1);
-            let inset = click_body_inset(hwnd);
-            let width = click_body_width(hwnd).max(1);
-            let inside_body = x >= inset && x < inset + width && y >= 0;
+            let inside_body = hit_body(
+                x,
+                y,
+                click_body_inset(hwnd),
+                click_body_width(hwnd).max(1),
+                click_body_height(hwnd).max(1),
+            );
             if inside_body {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             } else {
@@ -784,12 +806,13 @@ impl Overlay {
     /// Drives both `pointer_over` (hover dwell) and `WM_NCHITTEST` (which pixels
     /// are pressable), so the pressable area and the drawn shape can never
     /// disagree. `logical_width`/`frame_width` are logical; DPI converts.
-    pub fn set_body(&mut self, logical_w: f32, frame_w: f32) {
+    pub fn set_body(&mut self, logical_w: f32, logical_h: f32, frame_w: f32) {
         let width = self.dpi().snap(logical_w) as i32;
         self.hover_width_px = width.max(1);
         self.state.body_inset =
             ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
         self.state.body_width = width.max(0);
+        self.state.body_height = self.dpi().snap(logical_h) as i32;
     }
 
     /// Window rect in physical screen pixels (not DPI-virtualized).
@@ -998,6 +1021,18 @@ mod tests {
         let p = placement(&work, 400);
         assert_eq!(p.y, 0);
         assert_eq!(p.x, 1920 + (1920 - 400) / 2);
+    }
+
+    #[test]
+    fn hit_body_covers_the_pill_only() {
+        // Body rect = inset 330, 231x40 inside the 850x250 fixed frame.
+        assert!(hit_body(330, 0, 330, 231, 40), "pill top-left corner");
+        assert!(hit_body(445, 39, 330, 231, 40), "pill bottom middle");
+        // Ear margins and the strip below the pill must pass through, or the
+        // invisible frame eats desktop clicks.
+        assert!(!hit_body(329, 20, 330, 231, 40), "left ear");
+        assert!(!hit_body(561, 20, 330, 231, 40), "right ear");
+        assert!(!hit_body(445, 40, 330, 231, 40), "below the pill");
     }
 
     #[test]

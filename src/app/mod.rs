@@ -276,7 +276,11 @@ pub fn run() -> std::process::ExitCode {
         view.island_height = state.logical_height();
         // The pressable/hoverable region follows the morphing body inside the
         // fixed frame, so it can never disagree with what is drawn.
-        overlay.set_body(state.logical_width(), state.frame_width());
+        overlay.set_body(
+            state.logical_width(),
+            state.logical_height(),
+            state.frame_width(),
+        );
 
         for event in overlay.pump_events() {
             match event {
