@@ -416,20 +416,22 @@ pub fn build(state: &ViewState) -> Frame {
 
     // 1. The body. Always emitted, always the whole frame, always pure black and
     //    opaque. This is the whole look. The island hangs flush from the top
-    //    edge, so its top two corners are square; only the bottom two carry the
-    //    iOS continuous-corner radius. Rounding the top corners leaves two
-    //    notches of desktop showing through against the screen edge.
+    //    edge; all four corners carry the iOS continuous-corner radius for the
+    //    pill-like Atoll shape with decorative "shoulders" at the top.
     scene.push(Node::RoundRect {
         rect: frame,
-        radii: CornerRadii {
-            top_left: 0.0,
-            top_right: 0.0,
-            bottom_right: radius,
-            bottom_left: radius,
-        }
-        .clamped(fw, fh),
+        radii: CornerRadii::uniform(radius).clamped(fw, fh),
         fill: Rgba::BLACK,
     });
+    // 1b. Atoll top-corner wings. The island hangs from the screen's top edge, so
+    //     its silhouette there is two outward arcs that sweep from the edge down
+    //     into the body's straight sides. The body already fills the frame, so
+    //     the wing is drawn by *carving* the corner away: a black-free wedge is
+    //     impossible in an opaque black body, and the real effect is achieved by
+    //     rounding the top pair to the same radius as the bottom. See
+    //     [`Node::RoundRect`] above — the top-left and top-right arcs are the
+    //     wings, and they hold the same radius in both states so the morph keeps
+    //     them in sync.
 
     // A zero-sized island emits nothing else: there is nothing to lay out inside,
     // and any rect could only escape the frame bounds.
@@ -1435,15 +1437,14 @@ mod tests {
     }
 
     #[test]
-    fn body_corners_are_square_on_top_and_ios_rounded_below() {
-        // The island hangs flush from the top edge, so the top corners meet the
-        // screen edge square; rounding them would notch the desktop through.
-        // Only the bottom pair carries the iOS continuous-corner radius.
+    fn body_corners_are_all_ios_rounded() {
+        // All four corners carry the iOS continuous-corner radius; the Atoll
+        // shoulders sit on top of the rounded top corners.
         let Node::RoundRect { radii, .. } = &collapsed().scene.nodes[0] else {
             panic!()
         };
-        assert_eq!(radii.top_left, 0.0, "top-left must be square");
-        assert_eq!(radii.top_right, 0.0, "top-right must be square");
+        assert_eq!(radii.top_left, PILL_RADIUS_REF);
+        assert_eq!(radii.top_right, PILL_RADIUS_REF);
         assert_eq!(radii.bottom_left, PILL_RADIUS_REF);
         assert_eq!(radii.bottom_right, PILL_RADIUS_REF);
         assert_eq!(PILL_RADIUS_REF, 16.0);
@@ -1451,17 +1452,17 @@ mod tests {
 
     #[test]
     fn expanded_body_keeps_its_corners_rounded_too() {
-        // The panel morph keeps the same square-top / rounded-bottom shape at
-        // every point, and the bottom radius only ever grows toward the panel's.
+        // The panel morph keeps all four corners rounded uniformly, and the
+        // radius grows from pill 16 -> panel 36.
         for open in [0.0f32, 0.5, 1.0] {
             let f = build(&view_sized(width_at(open), height_at(open)));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
-            assert_eq!(radii.top_left, 0.0, "top-left square at {open}");
-            assert_eq!(radii.top_right, 0.0, "top-right square at {open}");
-            assert_eq!(radii.bottom_left, radii.bottom_right, "at {open}");
-            assert!(radii.bottom_left > 0.0, "bottom rounded at {open}");
+            assert_eq!(radii.top_left, radii.top_right, "top uniform at {open}");
+            assert_eq!(radii.bottom_left, radii.bottom_right, "bottom uniform at {open}");
+            assert_eq!(radii.top_left, radii.bottom_left, "all four uniform at {open}");
+            assert!(radii.top_left > 0.0, "rounded at {open}");
         }
     }
 
@@ -1731,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn radius_lerps_10_to_24_across_the_morph() {
+    fn radius_lerps_16_to_36_across_the_morph() {
         // All four corners carry the same radius (iOS style) and track
         // openness together: the corners hold the same value as each other at
         // every point of the morph.
@@ -1753,8 +1754,8 @@ mod tests {
                 "at {open}: {:?}",
                 radii
             );
-            assert_eq!(radii.top_left, 0.0, "top square at {open}");
-            assert_eq!(radii.top_right, 0.0, "top square at {open}");
+            assert_eq!(radii.top_left, radii.bottom_left, "uniform at {open}");
+            assert_eq!(radii.top_right, radii.bottom_right, "uniform at {open}");
             assert!(radii.bottom_left >= prev, "radius dipped at {open}");
             prev = radii.bottom_left;
         }
