@@ -495,14 +495,21 @@ pub fn build(state: &ViewState) -> Frame {
         let th = line_height(&style);
         let h = (fh - 10.0).max(4.0);
         let mut x = 10.0f32;
-        let rows: Vec<String> = state
-            .weather
-            .as_ref()
-            .map(|w| w.label())
-            .into_iter()
-            .chain((state.downloads.delta > 0).then(|| state.downloads.label()))
-            .chain((!state.shelf.is_empty()).then(|| format!("Shelf {} items", state.shelf.len())))
-            .collect();
+        let mut rows: Vec<String> = Vec::new();
+                // Now Playing leads the pill (DynamicNotch/Atoll): the track the user
+                // is actually listening to is worth more than the weather.
+                if state.media.playing && !state.media.title.is_empty() {
+                    rows.push(state.media.title.clone());
+                }
+                rows.extend(
+                    state
+                        .weather
+                        .as_ref()
+                        .map(|w| w.label())
+                        .into_iter()
+                        .chain((state.downloads.delta > 0).then(|| state.downloads.label()))
+                        .chain((!state.shelf.is_empty()).then(|| format!("Shelf {} items", state.shelf.len()))),
+                );
         for text in rows {
             let tw = measure(&text, &style);
             let w = (tw + 14.0).min(fw * 0.5);
