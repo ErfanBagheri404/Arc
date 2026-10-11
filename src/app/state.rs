@@ -19,7 +19,7 @@ pub const PANEL_RADIUS: f32 = 28.0;
 /// Dwell time before hover expands the island, in seconds (Phase 2, hover).
 /// Short enough to feel like a reaction, long enough not to fire on a mouse
 /// crossing the top edge while scrolling.
-pub const HOVER_DWELL: f32 = 0.3;
+pub const HOVER_DWELL: f32 = 0.08;
 
 /// Pure hover-dwell state machine. Owns *when* hover asks for expansion;
 /// [`IslandState`] owns the resulting geometry springs.
@@ -340,12 +340,12 @@ mod tests {
         let mut s = IslandState::collapsed();
         // Below the dwell threshold nothing happens.
         for _ in 0..5 {
-            assert!(!s.hover_step(true, 0.05));
+            assert!(!s.hover_step(true, HOVER_DWELL / 10.0));
         }
         assert_eq!(s.mode(), WindowMode::Collapsed);
 
         // Crossing it expands, and the change is reported once.
-        assert!(s.hover_step(true, 0.10));
+        assert!(s.hover_step(true, HOVER_DWELL + 0.02));
         assert_eq!(s.mode(), WindowMode::Expanded);
         assert!(s.expanded_by_hover());
         // ... and only once: dwelling longer must not re-fire.
@@ -360,16 +360,15 @@ mod tests {
     #[test]
     fn hover_dwell_restarts_after_leaving() {
         let mut s = IslandState::collapsed();
-        s.hover_step(true, 0.2);
-        s.hover_step(false, 0.016);
-        // Two more short visits must not add up to the dwell: it is not banked.
-        s.hover_step(true, 0.2);
-        assert_eq!(s.mode(), WindowMode::Collapsed);
-        s.hover_step(false, 0.016);
-        s.hover_step(true, 0.2);
+        // Each visit below the dwell threshold, then leave: the dwell is never
+        // banked across trips outside.
+        for _ in 0..2 {
+            s.hover_step(true, HOVER_DWELL / 2.0);
+            s.hover_step(false, 0.016);
+        }
         assert_eq!(s.mode(), WindowMode::Collapsed);
         // An uninterrupted visit does fire.
-        s.hover_step(true, 0.2);
+        s.hover_step(true, HOVER_DWELL + 0.02);
         assert_eq!(s.mode(), WindowMode::Expanded);
     }
 
@@ -390,7 +389,7 @@ mod tests {
     fn dwell_machine_is_pure_of_springs() {
         let mut h = Hover::new();
         assert!(!h.expanded());
-        // 0.3 s exactly is the threshold and must fire (>= not >).
+        // `HOVER_DWELL` exactly is the threshold and must fire (>= not >).
         assert!(!h.update(true, HOVER_DWELL - 0.01));
         assert!(h.update(true, 0.02));
         h.enter_expansion();
