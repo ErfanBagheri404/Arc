@@ -6,8 +6,8 @@
 //! Contract (do not change without updating `app::run`):
 //! - `new(hwnd)` once, after the window exists.
 //! - `resize(physical_w, physical_h)` whenever the island geometry changes.
-//! - `present(frame, dpi_scale, dt_seconds)` exactly once per frame the app loop
-//!   asks for; the renderer must not present on its own.
+//! - `present(frame, dpi_scale, dt_seconds, body_offset_x)` exactly once per
+//!   frame the app loop asks for; the renderer must not present on its own.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -383,6 +383,9 @@ impl Renderer {
         let swapchain = step!("CreateSwapChainForComposition", unsafe {
             factory.CreateSwapChainForComposition(&device, &desc, None)
         });
+        // The composition surface is sampled by DComp, so a queued frame
+        // must not sit in the back buffer longer than one present, and
+        // the chain must never report lost just because we asked it to.
         // Explicit sRGB rather than the driver's default (risks T3).
         if let Ok(swapchain3) = swapchain.cast::<IDXGISwapChain3>() {
             let _ = unsafe { swapchain3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) };
@@ -466,7 +469,12 @@ impl Renderer {
     }
 
     /// Draw one frame and present it.
-    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32) {
+    ///
+    /// `offset_x` shifts the whole scene right, in logical units. The window is
+    /// a fixed frame (see `app::run`), so the morphing island is *centred* by
+    /// translating the scene instead of resizing the HWND — a `SetWindowPos` +
+    /// `ResizeBuffers` every animating frame is what made the expand stutter.
+    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32, offset_x: f32) {
         self.probe.presents = self.probe.presents.saturating_add(1);
         self.probe.last_node_count = frame.scene.count();
         let ms = dt.max(0.0) * 1000.0;
@@ -494,6 +502,13 @@ impl Renderer {
         };
 
         unsafe { target.BeginDraw() };
+        if offset_x != 0.0 {
+            // The render target is DPI-scaled, so a translation in logical
+            // units lands in device pixels without further conversion.
+            let _ = unsafe {
+                target.SetTransform(&Matrix3x2::translation(offset_x, 0.0))
+            };
+        }
         unsafe {
             // Transparent clear every frame: the body is drawn at alpha 1 and
             // everything outside it must stay see-through.
@@ -989,8 +1004,8 @@ mod tests {
     #[test]
     fn present_counts_frames_and_nodes() {
         let mut r = Renderer::new(NonNull::dangling()).expect("renderer");
-        r.present(&frame(), 1.0, 1.0 / 60.0);
-        r.present(&frame(), 1.0, 1.0 / 60.0);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0);
         assert_eq!(r.probe().presents, 2);
         assert_eq!(r.probe().last_node_count, 1);
         assert!(r.probe().avg_frame_ms.is_some());
@@ -1009,7 +1024,7 @@ mod tests {
         let mut r = Renderer::new(NonNull::dangling()).expect("renderer");
         r.resize(0, 0);
         assert_eq!((r.width, r.height), (1, 1));
-        r.present(&frame(), 1.0, 1.0 / 60.0);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0);
         assert_eq!(
             r.probe().presents,
             1,

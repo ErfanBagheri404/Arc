@@ -223,6 +223,23 @@ impl IslandState {
         self.width.value()
     }
 
+    /// The window frame width. Fixed: `max(PILL_W, PANEL_W)` plus the ear wings,
+    /// so the HWND and swapchain are built once and the expand/collapse morph
+    /// never resizes them (that resize-per-frame was the animation jank).
+    pub fn frame_width(&self) -> f32 {
+        PANEL_W.max(PILL_W) + 2.0 * crate::ui::layout::EAR_W
+    }
+
+    pub fn frame_height(&self) -> f32 {
+        PANEL_H.max(PILL_H)
+    }
+
+    /// Logical left inset that centres the current body inside the fixed frame.
+    /// Also the horizontal hit-test offset: subtract it from a click's `x`.
+    pub fn body_offset_x(&self) -> f32 {
+        (self.frame_width() - self.logical_width()) / 2.0
+    }
+
     /// Window frame width: body + ear wings on both sides.
 
     pub fn logical_height(&self) -> f32 {
@@ -335,6 +352,38 @@ mod tests {
         assert_eq!(s.mode(), WindowMode::Hidden);
         s.toggle();
         assert_eq!(s.mode(), WindowMode::Expanded);
+    }
+
+    #[test]
+    fn the_frame_is_fixed_so_morphs_never_resize_the_window() {
+        let mut s = IslandState::collapsed();
+        let (fw, fh) = (s.frame_width(), s.frame_height());
+        assert_eq!(fw, PANEL_W + 2.0 * crate::ui::layout::EAR_W);
+        assert_eq!(fh, PANEL_H);
+        s.toggle();
+        for _ in 0..200 {
+            s.step_dt(1.0 / 60.0);
+        }
+        assert_eq!(
+            (s.frame_width(), s.frame_height()),
+            (fw, fh),
+            "frame must not move between modes — the morph is a clip offset"
+        );
+    }
+
+    #[test]
+    fn the_body_is_centred_in_the_frame() {
+        let s = IslandState::collapsed();
+        assert_eq!(
+            s.body_offset_x(),
+            (PANEL_W - PILL_W) / 2.0 + crate::ui::layout::EAR_W
+        );
+        let mut e = IslandState::collapsed();
+        e.toggle();
+        for _ in 0..200 {
+            e.step_dt(1.0 / 60.0);
+        }
+        assert_eq!(e.body_offset_x(), crate::ui::layout::EAR_W);
     }
 
     #[test]

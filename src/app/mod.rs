@@ -12,7 +12,7 @@ pub use state::IslandState;
 
 use std::time::{Duration, Instant};
 
-use crate::platform::{ClickThrough, Event, Overlay, Renderer};
+use crate::platform::{Event, Overlay, Renderer};
 use crate::services::media::Media;
 use crate::services::audio::{self, Audio};
 use crate::services::clipboard::Clipboard;
@@ -251,16 +251,20 @@ pub fn run() -> std::process::ExitCode {
     // First paint before the loop: with no events yet, the dirty-frame loop would
     // park on frame zero and show an undefined (never-presented) window until the
     // first hotkey or click.
-    overlay.resize(state.logical_width(), state.logical_height());
+    overlay.resize(state.frame_width(), state.frame_height());
     renderer.resize(
-        overlay.dpi().snap(state.logical_width()),
-        overlay.dpi().snap(state.logical_height()),
+        overlay.dpi().snap(state.frame_width()),
+        overlay.dpi().snap(state.frame_height()),
     );
     view.island_width = state.logical_width();
-        
     view.island_height = state.logical_height();
     let frame = ui::build(&view);
-    renderer.present(&frame, overlay.dpi().scale, 0.0);
+    renderer.present(
+        &frame,
+        overlay.dpi().scale,
+        0.0,
+        state.body_offset_x(),
+    );
 
     let mut last = Instant::now();
     loop {
@@ -269,9 +273,11 @@ pub fn run() -> std::process::ExitCode {
         // The persistent view must carry the current geometry: this iteration's
         // clicks are hit-tested against it.
         view.island_width = state.logical_width();
-        
         view.island_height = state.logical_height();
-        
+        // The pressable/hoverable region follows the morphing body inside the
+        // fixed frame, so it can never disagree with what is drawn.
+        overlay.set_body(state.logical_width(), state.frame_width());
+
         for event in overlay.pump_events() {
             match event {
                 Event::ToggleIsland => state.toggle(),
@@ -291,7 +297,21 @@ pub fn run() -> std::process::ExitCode {
                 // Clicks arrive in physical client pixels; the UI lays out in
                 // logical ones, so scale before hit-testing.
                 Event::LeftClick { x, y } => {
-                    let (lx, ly) = (x / scale, y / scale);
+                    // The window is the fixed max frame; the body sits centred
+                    // inside it. Translate into body space and ignore clicks on
+                    // the transparent ear margins — they look like desktop and
+                    // must behave like desktop.
+                    let lx = x / scale - state.body_offset_x();
+                    let ly = y / scale;
+                    if lx < 0.0 || lx > state.logical_width() {
+                        continue;
+                    }
+                    // A collapsed pill is pressable: any click inside it
+                    // toggles the island (DynamicNotch/Atoll behaviour).
+                    if !state.expanded() {
+                        state.toggle();
+                        redraw = true;
+                    }
                     if let Some(cmd) = view.media_command(lx, ly) {
                         media.send(cmd);
                         redraw = true;
@@ -355,7 +375,11 @@ pub fn run() -> std::process::ExitCode {
                     }
                 }
                 Event::CursorMoved { x, y } => {
-                    let (lx, ly) = (x / scale, y / scale);
+                    // Same body-space translation as clicks (only arrives while
+                    // the panel is interactive, so the frame-vs-body gap is the
+                    // ear margin plus the collapsed-width centring).
+                    let lx = x / scale - state.body_offset_x();
+                    let ly = y / scale;
                     let tab = view.tab_at(lx, ly);
                     let row = view.row_at(lx, ly);
                     if tab != view.hover_tab || row != view.hover_row {
@@ -537,12 +561,9 @@ pub fn run() -> std::process::ExitCode {
         if animating || hover_changed || redraw {
             last = now;
 
-            overlay.resize(state.logical_width(), state.logical_height());
-            overlay.set_click_through(if state.expanded() {
-                ClickThrough::No
-            } else {
-                ClickThrough::Yes
-            });
+            // Fixed frame: these calls early-out unless mode/DPI/monitor
+            // changed, so the morph costs no SetWindowPos and no ResizeBuffers.
+            overlay.resize(state.frame_width(), state.frame_height());
             // Keyboard focus follows the Terminal tab: the island is
             // NOACTIVATE, so without this `WM_CHAR` goes to whatever app the
             // user is actually typing in — the wrong target for a shell.
@@ -556,14 +577,18 @@ pub fn run() -> std::process::ExitCode {
                 }
             }
             renderer.resize(
-                overlay.dpi().snap(state.logical_width()),
-                overlay.dpi().snap(state.logical_height()),
+                overlay.dpi().snap(state.frame_width()),
+                overlay.dpi().snap(state.frame_height()),
             );
             view.island_width = state.logical_width();
-        
             view.island_height = state.logical_height();
             let frame = ui::build(&view);
-            renderer.present(&frame, overlay.dpi().scale, dt.as_secs_f32());
+            renderer.present(
+                &frame,
+                overlay.dpi().scale,
+                dt.as_secs_f32(),
+                state.body_offset_x(),
+            );
         } else {
             // Park: no presents, no spring integration. Re-arm the clock so the
             // first animating frame measures a sane dt.

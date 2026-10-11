@@ -17,7 +17,7 @@ pub mod window;
 #[allow(unused_imports)]
 pub use dpi::Dpi;
 pub use render::Renderer;
-pub use window::{ClickThrough, Overlay};
+pub use window::Overlay;
 
 /// Input/notification events the window layer hands to `app` each pump.
 #[derive(Debug, Clone, PartialEq)]

@@ -5,9 +5,10 @@
 //! Everything that enforces that lives here; `app` only sees [`Event`]s.
 //!
 //! Invariants this module guarantees:
-//! - [`ClickThrough::Yes`] (collapsed) sets `WS_EX_TRANSPARENT`, so clicks fall
-//!   through to whatever sits under the island. [`ClickThrough::No`] clears it.
-//!   `WM_NCHITTEST` mirrors the same policy with `HTTRANSPARENT` (T2 in
+//! - The window is a fixed max frame; only the live body inside it is clickable.
+//!   `WM_NCHITTEST` returns `HTCLIENT` over the body and `HTTRANSPARENT` over the
+//!   transparent ear margins, so the collapsed pill is pressable while nothing
+//!   invisible ever eats a click meant for the desktop behind it (T2 in
 //!   docs/07-RISKS.md: never a dead zone, never a focus steal).
 //! - Placement is always recomputed from the *live* monitor work area, never from
 //!   a cached rect, so `resize()` cannot drift off the top edge after a DPI change
@@ -38,14 +39,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible,
     PeekMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE,
+    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
     GWL_STYLE, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
     SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
     WM_CHAR, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING,
     WNDCLASSEXW, WS_CAPTION,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MAXIMIZE, WS_POPUP,
 };
 
 use super::dpi::Dpi;
@@ -166,27 +167,20 @@ struct WindowPos {
 /// queue without a global.
 struct State {
     events: Vec<Event>,
-    click_through: ClickThrough,
-}
-
-/// Whether the island swallows mouse input.
-///
-/// `Yes` is the right initial state: the island starts collapsed and must not
-/// eat clicks. `No` is used while the panel is open so it can be interacted with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ClickThrough {
-    /// Clicks pass through to whatever is underneath (the collapsed island).
-    #[default]
-    Yes,
-    /// The island takes input (the open panel).
-    No,
+    /// Left inset of the live body inside the fixed frame, in client physical
+    /// px. Used by `WM_NCHITTEST` so only the visible island is clickable —
+    /// the transparent ear margins pass through to the desktop.
+    body_inset: i32,
+    /// Live body width in client physical px (see `body_inset`).
+    body_width: i32,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             events: Vec::with_capacity(16),
-            click_through: ClickThrough::Yes,
+            body_inset: 0,
+            body_width: 0,
         }
     }
 }
@@ -216,12 +210,27 @@ fn push_event(hwnd: HWND, event: Event) {
     }
 }
 
-fn click_through_active(hwnd: HWND) -> bool {
-    // SAFETY: see `userdata`. Defaults to pass-through when the slot is empty,
-    // which is the safe direction (never swallow a click we did not intend to).
+fn click_body_inset(hwnd: HWND) -> i32 {
+    unsafe { userdata(hwnd) }.map(|s| s.body_inset).unwrap_or(0)
+}
+
+fn click_body_width(hwnd: HWND) -> i32 {
+    // Mirrors `pointer_over`: the live body width, centred in the fixed frame.
     unsafe { userdata(hwnd) }
-        .map(|s| s.click_through == ClickThrough::Yes)
-        .unwrap_or(true)
+        .map(|s| s.body_width)
+        .unwrap_or(0)
+}
+
+/// Physical client origin of `hwnd`. The frame is borderless, so this is also
+/// the window origin; a failed query degrades to pass-through (0,0 keeps the
+/// body inset out of reach on absurd coordinates).
+fn client_origin(hwnd: HWND) -> (i32, i32) {
+    let mut r = RECT::default();
+    // SAFETY: read-only query on a valid HWND.
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return (0, 0);
+    }
+    (r.left, r.top)
 }
 
 /// `LPARAM`-packed client coordinates are a signed 16-bit pair.
@@ -473,13 +482,22 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_NCHITTEST => {
-            // Click-through is a *policy* (docs/05 §2), not just a style bit.
-            // HTTRANSPARENT keeps the collapsed island a true pass-through with
-            // no dead zone, and leaves a hook for click-outside later.
-            if click_through_active(hwnd) {
-                LRESULT(HTTRANSPARENT as isize)
-            } else {
+            // The fixed frame is larger than the visible body, so hit-testing
+            // is done against the *live* body rect: the pill/panel is clickable
+            // (HTCLIENT), the transparent ear margins pass through (HTTRANSPARENT)
+            // so they never become a dead zone over the desktop.
+            // LPARAM carries *screen* coords; the body inset is client-relative,
+            // and the frame is borderless so client origin == window origin.
+            let (sx, sy) = lparam_xy(lparam);
+            let origin = client_origin(hwnd);
+            let (x, y) = (sx as i32 - origin.0, sy as i32 - origin.1);
+            let inset = click_body_inset(hwnd);
+            let width = click_body_width(hwnd).max(1);
+            let inside_body = x >= inset && x < inset + width && y >= 0;
+            if inside_body {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            } else {
+                LRESULT(HTTRANSPARENT as isize)
             }
         }
 
@@ -532,6 +550,8 @@ unsafe extern "system" fn wnd_proc(
 pub struct Overlay {
     hwnd: HWND,
     dpi: Dpi,
+    /// Body width in physical px for hover hit-testing (frame is fixed max).
+    hover_width_px: i32,
     state: Box<State>,
     monitor: HMONITOR,
     logical_size: (f32, f32),
@@ -558,7 +578,7 @@ impl Overlay {
                 // TOOLWINDOW: no taskbar and no Alt-Tab entry. NOACTIVATE: never
                 // steal focus. TOPMOST: stay above maximized apps. TRANSPARENT:
                 // start click-through, matching the initial collapsed state.
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                 windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR::null(),
                 WS_POPUP,
@@ -599,6 +619,7 @@ impl Overlay {
         let mut overlay = Self {
             hwnd,
             dpi: Self::query_dpi(hwnd),
+            hover_width_px: 185,
             state,
             // SAFETY: read-only query on a valid HWND.
             monitor: unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
@@ -661,6 +682,12 @@ impl Overlay {
 
     /// Set the island's logical size and reposition it flush to the top edge.
     pub fn resize(&mut self, logical_w: f32, logical_h: f32) {
+        // Cheap early-out: the app calls this every animating frame, but the
+        // *frame* size only changes on mode/DPI/monitor changes. A SetWindowPos
+        // per frame was the expand-animation jank.
+        if self.logical_size == (logical_w, logical_h) {
+            return;
+        }
         self.logical_size = (logical_w, logical_h);
         self.apply_placement(logical_w, logical_h);
     }
@@ -725,26 +752,6 @@ impl Overlay {
         }
     }
 
-    pub fn set_click_through(&mut self, mode: ClickThrough) {
-        if self.state.click_through == mode {
-            return;
-        }
-        self.state.click_through = mode;
-
-        // SAFETY: pure ex-style bit update on our own window.
-        let current = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32;
-        let mut next = current;
-        if mode == ClickThrough::Yes {
-            next |= WS_EX_TRANSPARENT.0;
-        } else {
-            next &= !WS_EX_TRANSPARENT.0;
-        }
-        if next != current {
-            // SAFETY: our own HWND.
-            unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, next as isize) };
-        }
-    }
-
     /// Drain queued window messages into platform events. Non-blocking.
     pub fn pump_events(&mut self) -> Vec<Event> {
         self.pump_messages();
@@ -764,7 +771,25 @@ impl Overlay {
         let Some(rect) = self.client_rect_physical() else {
             return false;
         };
-        p.x >= rect.left && p.x < rect.right && p.y >= rect.top && p.y < rect.bottom
+        // The window is a fixed max frame; the visible body is centred inside
+        // it (`hover_width_px`, kept in sync by the app loop). Without this the
+        // transparent margins around the collapsed pill would expand it.
+        let inset = (rect.right - rect.left - self.hover_width_px.max(1)) / 2;
+        let (l, r) = (rect.left + inset, rect.right - inset);
+        p.x >= l && p.x < r && p.y >= rect.top && p.y < rect.bottom
+    }
+
+    /// Publish the live body's position/size inside the fixed frame.
+    ///
+    /// Drives both `pointer_over` (hover dwell) and `WM_NCHITTEST` (which pixels
+    /// are pressable), so the pressable area and the drawn shape can never
+    /// disagree. `logical_width`/`frame_width` are logical; DPI converts.
+    pub fn set_body(&mut self, logical_w: f32, frame_w: f32) {
+        let width = self.dpi().snap(logical_w) as i32;
+        self.hover_width_px = width.max(1);
+        self.state.body_inset =
+            ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
+        self.state.body_width = width.max(0);
     }
 
     /// Window rect in physical screen pixels (not DPI-virtualized).
