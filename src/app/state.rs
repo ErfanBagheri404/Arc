@@ -255,21 +255,20 @@ impl IslandState {
             return false;
         }
 
-        // Once the panel is open (hotkey or click) hover stops mattering:
-        // it must not collapse a panel the user asked to keep.
-        if self.mode == WindowMode::Expanded && !self.hover.expanded() {
+        // Expanded is expanded, however it got there (hover, click, hotkey):
+        // cursor off the body → collapse. This was the stuck-panel bug — a
+        // click-opened panel was exempt and only the tray could close it.
+        if self.mode == WindowMode::Expanded && !pointer_over {
             self.hover.leave_expansion();
-            return false;
+            self.mode = WindowMode::Collapsed;
+            self.retarget();
+            return true;
         }
 
         let was_expanded = self.expanded();
         if self.hover.update(pointer_over, dt) {
             self.hover.enter_expansion();
             self.mode = WindowMode::Expanded;
-            self.retarget();
-        } else if self.hover.expanded() && !pointer_over {
-            self.hover.leave_expansion();
-            self.mode = WindowMode::Collapsed;
             self.retarget();
         }
         self.expanded() != was_expanded
@@ -496,6 +495,23 @@ mod tests {
     }
 
     #[test]
+    fn click_opened_panel_collapses_when_the_cursor_leaves() {
+        let mut s = IslandState::collapsed();
+        s.toggle(); // opened by click/hotkey, not by hover
+        assert!(s.expanded());
+        assert!(!s.expanded_by_hover());
+        // Cursor sits elsewhere: one step later the panel must fold itself,
+        // with no tray click.
+        assert!(s.hover_step(false, 0.016));
+        assert_eq!(s.mode(), WindowMode::Collapsed);
+        // ... while the cursor on the body keeps it open.
+        let mut k = IslandState::collapsed();
+        k.toggle();
+        assert!(!k.hover_step(true, 0.016));
+        assert!(k.expanded());
+    }
+
+    #[test]
     fn hover_dwell_restarts_after_leaving() {
         let mut s = IslandState::collapsed();
         // Each visit below the dwell threshold, then leave: the dwell is never
@@ -511,16 +527,32 @@ mod tests {
     }
 
     #[test]
-    fn hover_never_collapses_a_hotkey_opened_panel() {
+    fn a_hotkey_opened_panel_folds_when_the_cursor_leaves() {
         let mut s = IslandState::collapsed();
         s.toggle();
         assert!(s.expanded());
-        // Cursor leaves the (now clickable) panel: it must stay open, because
-        // the user asked for it with the hotkey, not with a stray hover.
+        // Cursor off the panel → it folds. Whatever opened it (hotkey, click,
+        // hover), a panel never outlives the cursor's presence — otherwise it
+        // sits there until the user finds the tray icon.
+        assert!(s.hover_step(false, 0.05));
+        assert!(!s.expanded());
+        // Dwell must not re-expand it while the cursor is away.
         for _ in 0..10 {
             assert!(!s.hover_step(false, 0.05));
         }
-        assert!(s.expanded(), "hover must not steal a manually opened panel");
+        assert!(!s.expanded());
+    }
+
+    #[test]
+    fn dwell_does_not_fight_an_open_panel_under_the_cursor() {
+        let mut s = IslandState::collapsed();
+        s.toggle();
+        // Cursor stays on the body: the panel remains open and no collapse is
+        // reported, so the morph is never driven backwards by hover bookkeeping.
+        for _ in 0..10 {
+            assert!(!s.hover_step(true, 0.05));
+        }
+        assert!(s.expanded());
     }
 
     #[test]
