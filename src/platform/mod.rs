@@ -24,6 +24,9 @@ pub use window::Overlay;
 pub enum Event {
     /// Hotkey toggled the island (Ctrl+Shift+A by default).
     ToggleIsland,
+    /// Ctrl+Shift+Z: hide the island, or force it visible everywhere (even
+    /// over a fullscreen app). Sticky until pressed again.
+    ToggleVisibility,
     /// Cursor moved over the window (window-space px, plus time-since-enter).
     CursorMoved {
         x: f32,

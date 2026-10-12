@@ -285,6 +285,11 @@ pub fn run() -> std::process::ExitCode {
         for event in overlay.pump_events() {
             match event {
                 Event::ToggleIsland => state.toggle(),
+                // Ctrl+Shift+Z: user owns visibility from here on.
+                Event::ToggleVisibility => {
+                    state.toggle_visibility();
+                    redraw = true;
+                }
                 // A file dropped on the island pins to the shelf.
                 Event::FilesDropped { paths } => {
                     for p in paths {
@@ -294,10 +299,10 @@ pub fn run() -> std::process::ExitCode {
                     }
                     view.shelf = shelf.items().to_vec();
                 }
-                Event::FullscreenEnter => state.hide(),
+                Event::FullscreenEnter => state.fullscreen_enter(),
                 // Back to whatever we were showing before the fullscreen app —
                 // not unconditionally the panel.
-                Event::FullscreenExit => state.restore(),
+                Event::FullscreenExit => state.fullscreen_exit(),
                 // Clicks arrive in physical client pixels; the UI lays out in
                 // logical ones, so scale before hit-testing.
                 Event::LeftClick { x, y } => {

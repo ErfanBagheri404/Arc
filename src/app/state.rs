@@ -81,6 +81,18 @@ impl Hover {
     }
 }
 
+/// Who currently owns the island's visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserVis {
+    /// Startup default: the fullscreen probe may hide/restore it.
+    #[default]
+    Auto,
+    /// User hid it with Ctrl+Shift+Z; nothing may bring it back but the hotkey.
+    Hidden,
+    /// User brought it back with Ctrl+Shift+Z; it stays over everything.
+    Pinned,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowMode {
     /// Not shown at all (fullscreen video, or before first paint).
@@ -94,6 +106,9 @@ pub enum WindowMode {
 /// Island geometry + morph springs.
 pub struct IslandState {
     mode: WindowMode,
+    /// Who decides visibility: the automatic fullscreen policy, or the user
+    /// via Ctrl+Shift+Z (sticky `Hidden`/`Pinned` until toggled again).
+    user_vis: UserVis,
     /// What to restore to when a fullscreen app goes away.
     mode_before_hide: WindowMode,
     width: Spring,
@@ -106,6 +121,7 @@ impl IslandState {
     pub fn collapsed() -> Self {
         Self {
             mode: WindowMode::Collapsed,
+            user_vis: UserVis::Auto,
             mode_before_hide: WindowMode::Collapsed,
             width: Spring::new(PILL_W, SpringConfig::OPEN),
             height: Spring::new(PILL_H, SpringConfig::OPEN),
@@ -119,6 +135,11 @@ impl IslandState {
     #[allow(dead_code)]
     pub fn mode(&self) -> WindowMode {
         self.mode
+    }
+
+    /// Who owns visibility right now (Ctrl+Shift+Z flips it).
+    pub fn user_vis(&self) -> UserVis {
+        self.user_vis
     }
 
     pub fn expanded(&self) -> bool {
@@ -175,6 +196,41 @@ impl IslandState {
     /// True while suppressed for a fullscreen app.
     pub fn hidden(&self) -> bool {
         self.mode == WindowMode::Hidden
+    }
+
+    /// Ctrl+Shift+Z: user-driven hide/show, overriding the fullscreen policy.
+    ///
+    /// `Hidden` and `Pinned` are sticky on purpose — once the user takes
+    /// control, the 1 Hz fullscreen probe may no longer make the island
+    /// vanish on them ("goes and comes back"): `Hidden` stays hidden through
+    /// fullscreen exits, `Pinned` stays visible even over a fullscreen app.
+    pub fn toggle_visibility(&mut self) {
+        match self.user_vis {
+            UserVis::Auto | UserVis::Pinned => {
+                self.user_vis = UserVis::Hidden;
+                self.hide();
+            }
+            UserVis::Hidden => {
+                self.user_vis = UserVis::Pinned;
+                self.restore();
+            }
+        }
+    }
+
+    /// A fullscreen app appeared on our monitor. Only the automatic policy
+    /// may hide for it; a user-hidden or pinned island is left alone.
+    pub fn fullscreen_enter(&mut self) {
+        if self.user_vis == UserVis::Auto {
+            self.hide();
+        }
+    }
+
+    /// The fullscreen app went away. Restores only what the automatic policy
+    /// hid — never a user-hidden island.
+    pub fn fullscreen_exit(&mut self) {
+        if self.user_vis == UserVis::Auto {
+            self.restore();
+        }
     }
 
     /// True while expanded *by hover*, which collapses again the moment
@@ -343,6 +399,37 @@ mod tests {
         let mut s = IslandState::collapsed();
         s.restore();
         assert_eq!(s.mode(), WindowMode::Collapsed);
+    }
+
+    #[test]
+    fn ctrl_shift_z_hides_then_pins_visible_everywhere() {
+        let mut s = IslandState::collapsed();
+        s.toggle_visibility();
+        assert!(s.hidden(), "Z must hide the island");
+        assert_eq!(s.user_vis(), UserVis::Hidden);
+        s.toggle_visibility();
+        assert!(!s.hidden(), "Z again must bring it back");
+        assert_eq!(s.user_vis(), UserVis::Pinned);
+    }
+
+    #[test]
+    fn user_hidden_ignores_fullscreen_exit() {
+        let mut s = IslandState::collapsed();
+        s.toggle_visibility(); // Hidden
+        s.fullscreen_exit();
+        assert!(s.hidden(), "a user-hidden island must stay hidden");
+        s.toggle_visibility(); // Pinned
+        s.fullscreen_enter();
+        assert!(!s.hidden(), "a pinned island stays over a fullscreen app");
+    }
+
+    #[test]
+    fn auto_mode_hides_and_restores_with_fullscreen() {
+        let mut s = IslandState::collapsed();
+        s.fullscreen_enter();
+        assert!(s.hidden());
+        s.fullscreen_exit();
+        assert!(!s.hidden());
     }
 
     #[test]

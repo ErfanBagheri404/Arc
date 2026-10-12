@@ -37,6 +37,7 @@ use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDR
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, UnregisterHotKey,
     HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_A,
+    VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
@@ -65,6 +66,8 @@ const CLASS_NAME: &str = "ArcOverlayWindow";
 
 /// Hotkey id for Ctrl+Shift+A. `WM_HOTKEY` carries this in `wParam`.
 const HOTKEY_TOGGLE: i32 = 0xA1;
+/// Hotkey id for Ctrl+Shift+Z: hide the island, or force it visible everywhere.
+const HOTKEY_VISIBILITY: i32 = 0xA2;
 
 /// Logical pixels of breathing room kept across the monitor, so an expanded
 /// panel never touches the bezel (docs/05 §6: `clamp(…, 0, monitor_w − 60)`).
@@ -404,6 +407,9 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == HOTKEY_TOGGLE as usize {
                 push_event(hwnd, Event::ToggleIsland);
                 LRESULT(0)
+            } else if wparam.0 == HOTKEY_VISIBILITY as usize {
+                push_event(hwnd, Event::ToggleVisibility);
+                LRESULT(0)
             } else {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
@@ -691,6 +697,22 @@ impl Overlay {
                 VK_A.0 as u32,
             )
         };
+        // Ctrl+Shift+Z is independent: losing it must not cost the A toggle.
+        // SAFETY: registering against our own HWND, once per process lifetime.
+        let vis = unsafe {
+            RegisterHotKey(
+                Some(self.hwnd),
+                HOTKEY_VISIBILITY,
+                hotkey_modifiers(),
+                VK_Z.0 as u32,
+            )
+        };
+        if let Err(err) = vis {
+            log::error!(
+                "arc: could not register Ctrl+Shift+Z ({err:?}) — another app owns the \
+                 combination; visibility stays on the fullscreen policy"
+            );
+        }
         match registered {
             Ok(()) => self.hotkey_registered = true,
             Err(err) => {
@@ -989,8 +1011,10 @@ impl Drop for Overlay {
     fn drop(&mut self) {
         // Before the HWND dies: the shell needs a live window to accept NIM_DELETE.
         tray::remove();
+        // SAFETY: unregistering hotkeys we registered against our own HWND.
+        // A failed registration means the id is ours to ignore, not to free.
+        let _ = unsafe { UnregisterHotKey(Some(self.hwnd), HOTKEY_VISIBILITY) };
         if self.hotkey_registered {
-            // SAFETY: unregistering a hotkey we registered against our own HWND.
             let _ = unsafe { UnregisterHotKey(Some(self.hwnd), HOTKEY_TOGGLE) };
         }
         // Clear the userdata slot *before* the Box dies so a message already in
