@@ -5,11 +5,13 @@
 //! Everything that enforces that lives here; `app` only sees [`Event`]s.
 //!
 //! Invariants this module guarantees:
-//! - The window is a fixed max frame; only the live body inside it is clickable.
-//!   `WM_NCHITTEST` returns `HTCLIENT` over the body and `HTTRANSPARENT` over the
-//!   transparent ear margins, so the collapsed pill is pressable while nothing
-//!   invisible ever eats a click meant for the desktop behind it (T2 in
-//!   docs/07-RISKS.md: never a dead zone, never a focus steal).
+//! - The window is a fixed max frame; `set_body` clips the *window region* to
+//!   the live body via `SetWindowRgn`, so clicks, hover and `WM_MOUSEMOVE`
+//!   outside that rect are routed by Windows itself to whatever is below —
+//!   exactly what the icons and tray items that live near the notch need.
+//!   `WM_NCHITTEST` (`HTCLIENT` over the body, `HTTRANSPARENT` elsewhere) and
+//!   the hover dwell stay bounded to the same rect as a second line of defence
+//!   (T2 in docs/07-RISKS.md: never a dead zone, never a focus steal).
 //! - Placement is always recomputed from the *live* monitor work area, never from
 //!   a cached rect, so `resize()` cannot drift off the top edge after a DPI change
 //!   or a monitor re-arrangement.
@@ -24,7 +26,8 @@ use windows::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    CreateRectRgn, GetMonitorInfoW, MonitorFromWindow, SetWindowRgn, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -177,6 +180,8 @@ struct State {
     /// the hit-test would accept the whole 200px frame column, so the
     /// transparent strip below the pill would silently eat desktop clicks.
     body_height: i32,
+    /// Last region rect passed to `SetWindowRgn`; skips no-op OS calls.
+    applied_rgn: (i32, i32, i32, i32),
 }
 
 impl Default for State {
@@ -186,6 +191,7 @@ impl Default for State {
             body_inset: 0,
             body_width: 0,
             body_height: 0,
+            applied_rgn: (0, 0, 0, 0),
         }
     }
 }
@@ -794,18 +800,25 @@ impl Overlay {
             return false;
         };
         // The window is a fixed max frame; the visible body is centred inside
-        // it (`hover_width_px`, kept in sync by the app loop). Without this the
-        // transparent margins around the collapsed pill would expand it.
+        // it (`set_body` keeps every field in sync). Bound x *and* y by the
+        // live body: without the height bound, sweeping the cursor under a
+        // collapsed pill would dwell-hover it open and cover the very thing
+        // the user was aiming at near the notch.
         let inset = (rect.right - rect.left - self.hover_width_px.max(1)) / 2;
         let (l, r) = (rect.left + inset, rect.right - inset);
-        p.x >= l && p.x < r && p.y >= rect.top && p.y < rect.bottom
+        let bottom = rect.top + self.state.body_height.max(1);
+        p.x >= l && p.x < r && p.y >= rect.top && p.y < bottom
     }
 
     /// Publish the live body's position/size inside the fixed frame.
     ///
-    /// Drives both `pointer_over` (hover dwell) and `WM_NCHITTEST` (which pixels
-    /// are pressable), so the pressable area and the drawn shape can never
-    /// disagree. `logical_width`/`frame_width` are logical; DPI converts.
+    /// Sets the window *region* to exactly the body rect, so Windows itself
+    /// routes every click, hover and `WM_MOUSEMOVE` outside that rect to the
+    /// window below — the transparent margins around the collapsed pill (and
+    /// the strip under it) are untouchable by us, which is precisely what the
+    /// desktop icons that live near the notch need. `WM_NCHITTEST` and
+    /// `pointer_over` keep the same rect as a second line of defence; all
+    /// three read the same `hit_body` helper so they cannot disagree.
     pub fn set_body(&mut self, logical_w: f32, logical_h: f32, frame_w: f32) {
         let width = self.dpi().snap(logical_w) as i32;
         self.hover_width_px = width.max(1);
@@ -813,6 +826,18 @@ impl Overlay {
             ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
         self.state.body_width = width.max(0);
         self.state.body_height = self.dpi().snap(logical_h) as i32;
+        // Window coords (popup: client == window): body rect only.
+        let l = self.state.body_inset;
+        let (r, b) = (l + self.state.body_width, self.state.body_height);
+        let (l, t) = (l, 0);
+        if (l, t, r, b) != self.state.applied_rgn {
+            self.state.applied_rgn = (l, t, r, b);
+            // SAFETY: CreateRectRgn returns an owned HRGN; SetWindowRgn takes
+            // ownership on success *and* failure (MSDN), so there is no leak
+            // and no double free. The region is in window coordinates.
+            let hrgn = unsafe { CreateRectRgn(l, t, r, b) };
+            unsafe { SetWindowRgn(self.hwnd, Some(hrgn), true) };
+        }
     }
 
     /// Window rect in physical screen pixels (not DPI-virtualized).
