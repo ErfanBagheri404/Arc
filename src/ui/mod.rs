@@ -883,6 +883,19 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
             ),
             None,
         ),
+        Hud::Online(online) => (
+            if *online { PILL_GREEN } else { PILL_AMBER },
+            if *online { "online" } else { "offline" }.to_string(),
+            None,
+        ),
+        Hud::Vpn(name) => (
+            PILL_GREEN,
+            match name {
+                Some(n) => format!("VPN \u{b7} {}", n.chars().take(18).collect::<String>()),
+                None => "VPN off".to_string(),
+            },
+            None,
+        ),
     };
 
     let mut out = vec![Node::RoundRect {

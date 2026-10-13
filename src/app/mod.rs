@@ -18,7 +18,8 @@ use crate::services::audio::{self, Audio};
 use crate::services::clipboard::Clipboard;
 use crate::services::picker::Picker;
 use crate::services::calendars::Calendar;
-use crate::services::downloads::Downloads;
+use crate::services::downloads;
+use crate::services::net::{self, NetState};
 use crate::services::shelf::Shelf;
 use crate::services::terminal::Terminal;
 use crate::services::weather::Weather;
@@ -105,6 +106,9 @@ const IDLE_POLL: Duration = Duration::from_millis(25);
 /// change notification worth wiring, and 500 ms is well inside the HUD's 3 s
 /// window, so a plug/unplug is never missed.
 const POWER_POLL: Duration = Duration::from_millis(500);
+/// Connectivity, VPN tunnel, brightness: state, not events — 2 s is plenty
+/// and keeps the GetIfTable2 walk off the hot path.
+const NET_POLL: Duration = Duration::from_secs(2);
 
 /// Arm a volume HUD when the master volume or mute state *changes*. Same rule as
 /// the battery: the transition is the event, holding the key just extends it.
@@ -188,6 +192,42 @@ fn power_hud(
     true
 }
 
+/// Arm a connectivity HUD when the network state *changes*.
+///
+/// VPN shows once per tunnel appearance (not every poll), offline shows on
+/// loss, online shows on recovery. Same transition rule as `power_hud`: the
+/// event is the change, not the steady state.
+fn net_hud(
+    s: &NetState,
+    last: &mut Option<NetState>,
+    now: Instant,
+    layer: &mut hud::HudLayer,
+) -> bool {
+    let previous = last.replace(s.clone());
+    let hud = match previous {
+        // First reading: a connected VPN is worth naming; a plain network isn't.
+        None => s.vpn.as_ref().map(|n| hud::Hud::Vpn(Some(n.clone()))),
+        Some(prev) => {
+            if prev.online && !s.online {
+                Some(hud::Hud::Online(false))
+            } else if !prev.online && s.online {
+                Some(hud::Hud::Online(true))
+            } else if prev.vpn != s.vpn {
+                Some(hud::Hud::Vpn(s.vpn.clone()))
+            } else {
+                None
+            }
+        }
+    };
+    match hud {
+        Some(h) => {
+            layer.arm(h, now);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Entry point.
 pub fn run() -> std::process::ExitCode {
     let Some(mut overlay) = Overlay::new() else {
@@ -217,6 +257,8 @@ pub fn run() -> std::process::ExitCode {
     // only ever sees the current HUD through `ViewState`.
     let mut hud = hud::HudLayer::default();
     let mut last_power = Instant::now() - POWER_POLL;
+    let mut last_net = Instant::now() - NET_POLL;
+    let mut last_net_state: Option<NetState> = None;
     let mut last_power_state: Option<power::Power> = None;
     // Audio (volume / mic) runs on its own worker thread — the COM pointer and
     // 250 ms cadence live there, the app only reads the snapshot.
@@ -227,7 +269,7 @@ pub fn run() -> std::process::ExitCode {
     let weather = Weather::new();
     let cals = Calendar::new();
     let usage = crate::services::usage::Usage::new();
-    let downloads = Downloads::new();
+    let downloads = downloads::Downloads::new();
     let mut shelf = Shelf::load();
     let mut last_audio_state: Option<(u8, bool)> = None;
     // The terminal is a long-lived shell: spawn once, keep it for the app's
@@ -464,6 +506,14 @@ pub fn run() -> std::process::ExitCode {
                     view.hud = hud.current();
                     redraw = true;
                 }
+            }
+        }
+        if now.duration_since(last_net) >= NET_POLL {
+            last_net = now;
+            let armed = net_hud(&net::sample(), &mut last_net_state, now, &mut hud);
+            if armed {
+                view.hud = hud.current();
+                redraw = true;
             }
         }
         // Audio: read the worker's snapshot every frame (a mutex read) and arm
