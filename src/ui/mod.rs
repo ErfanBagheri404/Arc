@@ -509,14 +509,19 @@ pub fn build(state: &ViewState) -> Frame {
                 } else if let Some(pet) = state.pet {
                     let (sx, sy, sw, sh) = crate::services::pet::frame_rect(pet.frame);
                     // Fit the cell inside the pill's height minus its padding,
-                    // preserving the sprite's aspect. The alpha is baked into
-                    // the sheet, so opacity rides on the node's own alpha.
-                    let h = (fh - PILL_PET_PAD * 2.0).max(6.0);
+                    // preserving the sprite's aspect. The height is the COLLAPSED
+                    // pill's, not `fh`: `fh` is mid-spring during a hover-expand,
+                    // and sizing from it ballooned the pet across the morph — the
+                    // "flicks frames when the notch expands" report.
+                    let h = PILL_H_REF - PILL_PET_PAD * 2.0;
                     let w = h * (sw / sh);
                     scene.push(Node::Sprite {
                         rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
                         handle: pet.handle,
                         src: Rect::new(sx, sy, sw, sh),
+                        // The pet dissolves on the glyph's curve, so a hover-open
+                        // is a crossfade into the panel instead of a hard cut.
+                        opacity: glyph_opacity,
                     });
                 } else {
                     let g = PILL_GLYPH;
@@ -1182,7 +1187,10 @@ fn fade_node(node: &mut Node, opacity: f32) {
         Node::Glyph { color, .. } => *color = layout::fade(*color, opacity),
         // Images carry no colour of their own; their accent would come from state.
         Node::Image { .. } => {}
-        Node::Sprite { .. } => {}
+        // Sprites carry no colour either — a plain alpha scalar — so the fade
+        // is a multiply. Without this, a pet would sit at full strength while
+        // the glyph around it dissolved, and pop out at the end.
+        Node::Sprite { opacity: alpha, .. } => *alpha *= opacity.clamp(0.0, 1.0),
         Node::Group { children, .. } => children.iter_mut().for_each(|c| fade_node(c, opacity)),
     }
 }

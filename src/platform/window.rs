@@ -43,6 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible,
     PeekMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
+    GetClassNameW,
     SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE,
     HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
@@ -320,6 +321,28 @@ fn strips_chrome(style: i32) -> bool {
     // as fullscreen permanently. A real fullscreen app (game, F11 video) is
     // never `WS_MAXIMIZE`d — it positions itself over the monitor.
     style & (WS_CAPTION.0 as i32) == 0 && style & (WS_MAXIMIZE.0 as i32) == 0
+}
+
+/// True for the shell's desktop windows (`Progman`, `WorkerW`). The
+/// desktop covers the whole monitor with its caption stripped — a
+/// textbook fullscreen match — but it is where the user *goes* when
+/// they show the desktop, not an app taking over the screen, so the
+/// probe must never hide the island for it.
+fn is_shell_desktop(class: &str) -> bool {
+    matches!(class, "Progman" | "WorkerW")
+}
+
+/// The window class of `hwnd`, for the desktop-window check. Empty on
+/// any failure — which can only mean "not a shell window", since those
+/// always have a class.
+fn window_class(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    // SAFETY: read-only query, `buf` is a valid u16 buffer.
+    let got = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if got <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..got as usize])
 }
 
 /// Pure: hotkey modifiers for Ctrl+Shift+A. `MOD_NOREPEAT` keeps a held key from
@@ -944,8 +967,14 @@ impl Overlay {
                         false
                     } else {
                         // Both conditions: monitor-sized *and* chrome stripped.
+                        // The desktop itself (`Progman`/`WorkerW`) satisfies both
+                        // — showing the desktop is not a fullscreen app, and
+                        // hiding for it is the "notch vanishes on the desktop"
+                        // bug — so the shell's own windows never qualify.
                         let style = GetWindowLongW(fg, GWL_STYLE);
-                        covers_monitor(&fg_rect, &mi.rcMonitor) && strips_chrome(style)
+                        !is_shell_desktop(&window_class(fg))
+                            && covers_monitor(&fg_rect, &mi.rcMonitor)
+                            && strips_chrome(style)
                     }
                 }
             }
@@ -1104,6 +1133,17 @@ mod tests {
         assert!(covers_monitor(&r(0, 0, 1920, 1080), &mon));
         // A pixel of border slop still counts as fullscreen.
         assert!(covers_monitor(&r(0, 0, 1921, 1081), &mon));
+    }
+
+    #[test]
+    fn the_shell_desktop_is_never_treated_as_fullscreen() {
+        // The desktop covers the monitor with no caption: geometrically a
+        // perfect fullscreen match. Showing the desktop must not hide the
+        // island, so the shell's own classes are excluded up front.
+        assert!(is_shell_desktop("Progman"));
+        assert!(is_shell_desktop("WorkerW"));
+        assert!(!is_shell_desktop("Chrome_WidgetWin_1"));
+        assert!(!is_shell_desktop(""));
     }
 
     #[test]

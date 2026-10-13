@@ -570,7 +570,12 @@ impl Renderer {
                     );
                 }
             }
-            Node::Sprite { rect, handle, src } => self.draw_sprite(target, *rect, *handle, *src),
+            Node::Sprite {
+                rect,
+                handle,
+                src,
+                opacity,
+            } => self.draw_sprite(target, *rect, *handle, *src, *opacity),
             Node::Glyph { rect, name, color } => self.fill_glyph(target, *rect, name, *color),
             Node::Group { children, .. } => {
                 for child in children {
@@ -809,14 +814,17 @@ impl Renderer {
     /// Draw one frame of a spritesheet: the same bitmap path as `draw_image`,
     /// but `src` crops the sheet to the frame. Used by the idle-notch pet,
     /// where the sheet is one atlas and the frame is a 192x208 cell.
+    /// `opacity` rides on `DrawBitmap` itself — the sheet has no fill colour
+    /// to fade — and the node is skipped at 0, mirroring the glyph branch.
     fn draw_sprite(
         &mut self,
         target: &ID2D1RenderTarget,
         rect: Rect,
         handle: ImageHandle,
         src: Rect,
+        opacity: f32,
     ) {
-        if rect.w <= 0.0 || rect.h <= 0.0 || src.w <= 0.0 || src.h <= 0.0 {
+        if rect.w <= 0.0 || rect.h <= 0.0 || src.w <= 0.0 || src.h <= 0.0 || opacity <= 0.0 {
             return;
         }
         let Some(source) = self.decoded(handle) else {
@@ -844,7 +852,7 @@ impl Renderer {
             target.DrawBitmap(
                 &bitmap,
                 Some(&to_rect(rect)),
-                1.0,
+                opacity.clamp(0.0, 1.0),
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                 Some(&crop),
             )
@@ -871,6 +879,11 @@ impl Renderer {
             right: rect.max_x(),
             bottom: rect.max_y(),
         };
+        // DrawText with a fixed rect would wrap or overflow silently, so any
+        // caller that hands us more text than the box holds gets an ellipsis.
+        // This is what stops a long album title or host name from bleeding
+        // outside its row. Trimming lives on the cached format (set once in
+        // `text_format`), so a frame pays nothing for it.
         // DrawText takes a slice, so it gets the length the text actually has --
         // the NUL that wide() appends for PCWSTR is not part of it.
         let utf16: Vec<u16> = text.encode_utf16().collect();
@@ -982,6 +995,21 @@ impl Renderer {
             let _ = format.SetWordWrapping(
                 windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
             );
+            // Word-ellipsis trimming, once per cached format: DrawText with a
+            // fixed rect would wrap or bleed for any caller that hands us more
+            // text than the box holds. The sign belongs to the factory.
+            if let Some(dwrite) = self.dwrite.as_ref() {
+                if let Ok(sign) = dwrite.CreateEllipsisTrimmingSign(&format) {
+                    let _ = format.SetTrimming(
+                        &windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING {
+                            granularity: windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING_GRANULARITY_WORD,
+                            delimiter: 0,
+                            delimiterCount: 0,
+                        },
+                        &sign,
+                    );
+                }
+            }
         }
         self.formats.insert(key, format.clone());
         Some(format)

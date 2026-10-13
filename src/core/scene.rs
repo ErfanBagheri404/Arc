@@ -126,6 +126,10 @@ pub enum Node {
         /// Source rect in image-relative pixels, not clamped here: the crop
         /// clips itself against the image bounds in the renderer.
         src: Rect,
+        /// 0.0..=1.0. Sprites have no fill colour to fade, so the morph's
+        /// dissolve rides on this — without it a pet would sit at full
+        /// opacity under a glyph that is fading away, and pop out.
+        opacity: f32,
     },
     /// Horizontal progress bar with a filled portion.
     Bar {
