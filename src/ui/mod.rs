@@ -513,7 +513,7 @@ pub fn build(state: &ViewState) -> Frame {
                     // pill's, not `fh`: `fh` is mid-spring during a hover-expand,
                     // and sizing from it ballooned the pet across the morph — the
                     // "flicks frames when the notch expands" report.
-                    let h = PILL_H_REF - PILL_PET_PAD * 2.0;
+                    let h = crate::ui::layout::PILL_H_REF - PILL_PET_PAD * 2.0;
                     let w = h * (sw / sh);
                     scene.push(Node::Sprite {
                         rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
