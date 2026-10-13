@@ -112,7 +112,13 @@ pub(crate) fn http(url: &str) -> Option<String> {
     // The agent string is ASCII, so building a wide copy by hand is safe.
     let agent: Vec<u16> = "Arc\0".encode_utf16().collect();
     unsafe {
-        let h = InternetOpenW(PCWSTR(agent.as_ptr()), INTERNET_OPEN_TYPE_PRECONFIG.0, None, None, 0);
+        let h = InternetOpenW(
+            PCWSTR(agent.as_ptr()),
+            INTERNET_OPEN_TYPE_PRECONFIG.0,
+            None,
+            None,
+            0,
+        );
         if h.is_null() {
             return None;
         }
@@ -120,7 +126,9 @@ pub(crate) fn http(url: &str) -> Option<String> {
         struct S(*const core::ffi::c_void);
         impl Drop for S {
             fn drop(&mut self) {
-                unsafe { let _ = InternetCloseHandle(self.0); }
+                unsafe {
+                    let _ = InternetCloseHandle(self.0);
+                }
             }
         }
         let _s = S(h);
@@ -139,7 +147,9 @@ pub(crate) fn http(url: &str) -> Option<String> {
         let mut buf = [0u8; 4096];
         loop {
             let mut n = 0u32;
-            if InternetReadFile(file, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n).is_err() || n == 0 {
+            if InternetReadFile(file, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n).is_err()
+                || n == 0
+            {
                 break;
             }
             body.extend_from_slice(&buf[..n as usize]);

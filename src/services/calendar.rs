@@ -24,7 +24,12 @@ impl Event {
             return self.summary.clone();
         }
         let secs = self.start % 86_400;
-        format!("{:02}:{:02} {}", secs / 3600, (secs % 3600) / 60, self.summary)
+        format!(
+            "{:02}:{:02} {}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            self.summary
+        )
     }
 }
 
@@ -192,7 +197,10 @@ mod tests {
     fn epoch_math_is_self_consistent() {
         // One day is one day, wherever the anchor sits; and the timed-SAMPLE
         // parse must equal the formula (round-trip across both paths).
-        assert_eq!(days_from_civil(2026, 10, 10) - days_from_civil(2026, 10, 9), 1);
+        assert_eq!(
+            days_from_civil(2026, 10, 10) - days_from_civil(2026, 10, 9),
+            1
+        );
         let t = dt("20261009T090000Z").unwrap().0;
         assert_eq!(t, days_from_civil(2026, 10, 9) * 86_400 + 9 * 3600);
     }

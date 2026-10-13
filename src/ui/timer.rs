@@ -141,9 +141,9 @@ mod tests {
             },
         );
         assert_eq!(idle.len(), running.len());
-        assert!(running.iter().any(
-            |n| matches!(n, Node::Text { text, .. } if text == "02:00")
-        ));
+        assert!(running
+            .iter()
+            .any(|n| matches!(n, Node::Text { text, .. } if text == "02:00")));
     }
 
     #[test]

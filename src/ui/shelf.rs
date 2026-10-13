@@ -103,11 +103,7 @@ pub fn content(fw: f32, fh: f32, top: f32, items: &[Item]) -> Vec<Node> {
             let style = TextStyle::numeric(11.0);
             let lh = line_height(&style);
             out.push(Node::Text {
-                rect: put(
-                    fw,
-                    fh,
-                    Rect::new(r.x, r.y + (r.h - lh) / 2.0, r.w, lh),
-                ),
+                rect: put(fw, fh, Rect::new(r.x, r.y + (r.h - lh) / 2.0, r.w, lh)),
                 text: ext,
                 style: TextStyle {
                     color: Rgba::rgba(1.0, 1.0, 1.0, 0.5),
@@ -147,7 +143,11 @@ mod tests {
     fn item(path: &str, thumb: bool) -> Item {
         Item {
             path: path.into(),
-            thumb: if thumb { ImageHandle(7) } else { ImageHandle::default() },
+            thumb: if thumb {
+                ImageHandle(7)
+            } else {
+                ImageHandle::default()
+            },
         }
     }
 
@@ -175,7 +175,12 @@ mod tests {
 
     #[test]
     fn an_image_tile_draws_its_thumbnail_and_a_plain_one_does_not() {
-        let nodes = content(400.0, 400.0, 0.0, &[item("a.png", true), item("b.txt", false)]);
+        let nodes = content(
+            400.0,
+            400.0,
+            0.0,
+            &[item("a.png", true), item("b.txt", false)],
+        );
         // img: track + image + label = 3. txt: track + glyph text + label = 3.
         assert_eq!(nodes.len(), 6);
         assert!(matches!(nodes[1], Node::Image { .. }));

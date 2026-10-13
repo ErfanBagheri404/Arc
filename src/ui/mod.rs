@@ -23,16 +23,17 @@ use crate::core::scene::{Align, Frame, Node, Scene, TextStyle, Weight};
 use crate::ui::layout::{island_radius, openness};
 
 pub mod calendar;
-pub mod shelf;
 pub mod clipboard;
 pub mod layout;
-pub mod picker;
 pub mod media;
+pub mod picker;
+pub mod settings;
+pub mod shelf;
 pub mod stats;
-pub mod timer;
-pub mod usage;
 pub mod terminal;
 pub mod text;
+pub mod timer;
+pub mod usage;
 
 pub use text::{line_height, measure};
 
@@ -40,8 +41,17 @@ pub use text::{line_height, measure};
 pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
-pub const TABS: [&str; 9] = [
-    "Media", "Stats", "Timer", "Clipboard", "Color", "Usage", "Calendar", "Shelf", "Terminal",
+pub const TABS: [&str; 10] = [
+    "Media",
+    "Stats",
+    "Timer",
+    "Clipboard",
+    "Color",
+    "Usage",
+    "Calendar",
+    "Shelf",
+    "Terminal",
+    "Settings",
 ];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
@@ -57,8 +67,11 @@ pub const HEADER_Y: f32 = 16.0;
 pub const HEADER_GAP: f32 = 6.0;
 /// Height of the tab strip band.
 pub const TAB_H: f32 = 20.0;
-/// Horizontal padding inside a tab, so its box is a superset of its label.
-pub const TAB_PAD: f32 = 10.0;
+/// Horizontal padding inside a tab, so its box is a superset of its
+/// label. 7, not the strip's old 10: ten tabs must fit the 608 px
+/// panel at the 8 px gap, and shrinking the chip keeps every label
+/// readable instead of collapsing the gaps to 0.
+pub const TAB_PAD: f32 = 7.0;
 /// Corner radius of the hovered/active tab's background pill.
 pub const TAB_RADIUS: f32 = 8.0;
 /// Height of one content row.
@@ -75,6 +88,10 @@ pub const PILL_GLYPH: f32 = 14.0;
 pub const PILL_GLYPH_RADIUS: f32 = 3.0;
 /// Gap below the collapsed pill's inline progress bar.
 pub const PILL_PROGRESS_BOTTOM_PAD: f32 = 6.0;
+/// Vertical padding around the idle pet in the collapsed pill: the sprite is
+/// the notch's centerpiece, so it may fill the pill more than the resting
+/// glyph's 14 px square.
+pub const PILL_PET_PAD: f32 = 4.0;
 /// Placeholder clock. A real tab replaces this with elapsed/remaining time.
 pub const FOOTER_CLOCK: &str = "00:00";
 
@@ -120,7 +137,7 @@ const TAB_LABEL: TextStyle = TextStyle {
 pub struct ViewState {
     pub island_width: f32,
     /// Window frame width = island_width + 2*EAR_W. Ears extend past the body.
-  // window size = body + ear wings
+    // window size = body + ear wings
     pub island_height: f32,
     /// Index into [`TABS`] of the selected tab.
     pub active_tab: usize,
@@ -175,6 +192,16 @@ pub struct ViewState {
     /// The tab the swap is leaving behind; its body is what fades out.
     /// Only meaningful while `tab_swap` is animating.
     pub prev_tab: usize,
+    /// The idle-notch pet: the interned sheet plus the frame to crop. `Some`
+    /// only when the pet is on AND installed; the pill then swaps its resting
+    /// glyph for the sprite. Owned by `services::pet::PetState`, mirrored here.
+    pub pet: Option<crate::services::pet::PetFrame>,
+    /// The pet on/off row mirrors this.
+    pub pet_on: bool,
+    /// The selected pet's display name, for the Settings picker row.
+    pub pet_name: Option<String>,
+    /// How many pets are installed — the picker only offers a choice when > 1.
+    pub pet_count: usize,
 }
 
 /// A tab content swap in flight — crossfade, then rise.
@@ -242,7 +269,6 @@ impl TabSwap {
         let rising = self.rise.step(dt);
         fading || rising
     }
-
 }
 
 impl ViewState {
@@ -255,12 +281,18 @@ impl ViewState {
     /// selection).
     pub fn click_tab(&mut self, x: f32, y: f32) -> Option<usize> {
         let next = self.tab_at(x, y)?;
-        if next != self.active_tab {
+        self.select_tab(next);
+        Some(next)
+    }
+
+    /// Jump to a tab by index with the same swap animation a click plays —
+    /// the tray's "Settings…" path to the panel.
+    pub fn select_tab(&mut self, tab: usize) {
+        if tab != self.active_tab {
             self.prev_tab = self.active_tab;
-            self.active_tab = next;
+            self.active_tab = tab;
             self.tab_swap.swap_to();
         }
-        Some(next)
     }
 
     /// Which tab contains panel-space `(x, y)`, if any.
@@ -359,6 +391,16 @@ impl ViewState {
         shelf::tile_at(self.island_width, row_band_top(), &self.shelf, x, y)
     }
 
+    /// Which Settings row panel-space `(x, y)` hits: `0` the pet toggle, `1`
+    /// the pet picker. Same contract as every other row hit-test.
+    pub fn settings_hit(&self, x: f32, y: f32) -> Option<usize> {
+        if self.active_tab != SETTINGS_TAB || !self.content_visible() {
+            return None;
+        }
+        let top = HEADER_Y + header_height() + HEADER_GAP;
+        settings::row_hit(self.island_width, top, x, y)
+    }
+
     /// Which color-picker control panel-space `(x, y)` hits: `0` is the
     /// readout (copies the current hex), `Some(i + 1)` is trail swatch `i`.
     pub fn picker_hit(&self, x: f32, y: f32) -> Option<usize> {
@@ -370,8 +412,7 @@ impl ViewState {
         if x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y() {
             return Some(0);
         }
-        picker::swatch_hit(self.island_width, top, self.picker.trail_len(), x, y)
-            .map(|i| i + 1)
+        picker::swatch_hit(self.island_width, top, self.picker.trail_len(), x, y).map(|i| i + 1)
     }
 
     /// Which timer preset button panel-space `(x, y)` hits, if any.
@@ -459,10 +500,24 @@ pub fn build(state: &ViewState) -> Frame {
             None => {
                 // Atoll swaps the collapsed glyph for its four-bar spectrum
                 // while a track plays; paused, the plain resting glyph is back.
+                // The idle pet wins over the glyph: a live mascot is the whole
+                // point of the notch, and the sprite already IS a centered mark.
                 if state.media.playing {
                     for n in viz_bars(fw, fh, state, glyph_opacity) {
                         scene.push(n);
                     }
+                } else if let Some(pet) = state.pet {
+                    let (sx, sy, sw, sh) = crate::services::pet::frame_rect(pet.frame);
+                    // Fit the cell inside the pill's height minus its padding,
+                    // preserving the sprite's aspect. The alpha is baked into
+                    // the sheet, so opacity rides on the node's own alpha.
+                    let h = (fh - PILL_PET_PAD * 2.0).max(6.0);
+                    let w = h * (sw / sh);
+                    scene.push(Node::Sprite {
+                        rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
+                        handle: pet.handle,
+                        src: Rect::new(sx, sy, sw, sh),
+                    });
                 } else {
                     let g = PILL_GLYPH;
                     scene.push(Node::RoundRect {
@@ -506,20 +561,22 @@ pub fn build(state: &ViewState) -> Frame {
         let h = (fh - 10.0).max(4.0);
         let mut x = 10.0f32;
         let mut rows: Vec<String> = Vec::new();
-                // Now Playing leads the pill (DynamicNotch/Atoll): the track the user
-                // is actually listening to is worth more than the weather.
-                if state.media.playing && !state.media.title.is_empty() {
-                    rows.push(state.media.title.clone());
-                }
-                rows.extend(
-                    state
-                        .weather
-                        .as_ref()
-                        .map(|w| w.label())
-                        .into_iter()
-                        .chain((state.downloads.delta > 0).then(|| state.downloads.label()))
-                        .chain((!state.shelf.is_empty()).then(|| format!("Shelf {} items", state.shelf.len()))),
-                );
+        // Now Playing leads the pill (DynamicNotch/Atoll): the track the user
+        // is actually listening to is worth more than the weather.
+        if state.media.playing && !state.media.title.is_empty() {
+            rows.push(state.media.title.clone());
+        }
+        rows.extend(
+            state
+                .weather
+                .as_ref()
+                .map(|w| w.label())
+                .into_iter()
+                .chain((state.downloads.delta > 0).then(|| state.downloads.label()))
+                .chain(
+                    (!state.shelf.is_empty()).then(|| format!("Shelf {} items", state.shelf.len())),
+                ),
+        );
         for text in rows {
             let tw = measure(&text, &style);
             let w = (tw + 14.0).min(fw * 0.5);
@@ -608,7 +665,11 @@ fn pill_progress(fw: f32, fh: f32, state: &ViewState, opacity: f32) -> Option<No
     let w = (fw - inset * 2.0).max(0.0);
     let h = 2.0;
     let y = fh - PILL_PROGRESS_BOTTOM_PAD - h;
-    let fill = layout::fade(m.accent.unwrap_or(crate::core::geom::Rgba::rgb(0.8, 0.2, 0.3)), opacity);
+    let fill = layout::fade(
+        m.accent
+            .unwrap_or(crate::core::geom::Rgba::rgb(0.8, 0.2, 0.3)),
+        opacity,
+    );
 
     let mut out = vec![Node::RoundRect {
         rect: put(fw, fh, Rect::new(inset, y, w, h)),
@@ -672,7 +733,13 @@ fn panel_content_for(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Nod
     if tab == MEDIA_TAB {
         out.extend(media::content(fw, fh, tab_bottom, &state.media));
     } else if tab == STATS_TAB {
-        out.extend(stats::content(fw, fh, tab_bottom, &state.stats, &state.procs));
+        out.extend(stats::content(
+            fw,
+            fh,
+            tab_bottom,
+            &state.stats,
+            &state.procs,
+        ));
     } else if tab == TIMER_TAB {
         out.extend(timer::content(fw, fh, tab_bottom, &state.timer));
     } else if tab == CLIPBOARD_TAB {
@@ -699,6 +766,15 @@ fn panel_content_for(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Nod
             state.terminal.as_ref(),
             state.terminal_error.as_deref(),
         ));
+    } else if tab == SETTINGS_TAB {
+        out.extend(settings::content(
+            fw,
+            fh,
+            tab_bottom,
+            state.pet_on,
+            state.pet_name.as_deref(),
+            state.pet_count,
+        ));
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -722,6 +798,8 @@ pub const SHELF_TAB: usize = 7;
 pub const USAGE_TAB: usize = 5;
 /// The Terminal tab — the ConPTY grid.
 pub const TERMINAL_TAB: usize = 8;
+/// The Settings tab — pet on/off and the pet picker.
+pub const SETTINGS_TAB: usize = 9;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -869,11 +947,7 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
             } else {
                 PILL_GREY
             };
-            (
-                col,
-                format!("{percent} %"),
-                Some(*percent as f32 / 100.0),
-            )
+            (col, format!("{percent} %"), Some(*percent as f32 / 100.0))
         }
         Hud::Volume { percent, muted } => (
             if *muted { PILL_AMBER } else { PILL_GREEN },
@@ -886,18 +960,16 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
         ),
         Hud::Timer { remaining, .. } => (
             PILL_GREEN,
-            format!(
-                "{}:{:02}",
-                remaining / 60,
-                remaining % 60
-            ),
+            format!("{}:{:02}", remaining / 60, remaining % 60),
             None,
         ),
         Hud::Online(online, ssid) => (
             if *online { PILL_GREEN } else { PILL_AMBER },
             match (online, ssid) {
                 (false, _) => "offline".to_string(),
-                (true, Some(s)) => format!("WiFi \u{b7} {}", s.chars().take(18).collect::<String>()),
+                (true, Some(s)) => {
+                    format!("WiFi \u{b7} {}", s.chars().take(18).collect::<String>())
+                }
                 (true, None) => "online".to_string(),
             },
             None,
@@ -947,11 +1019,7 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
     let tw = measure(&text, &style);
     let th = line_height(&style);
     out.push(Node::Text {
-        rect: put(
-            fw,
-            fh,
-            Rect::new((fw - tw) / 2.0, (fh - th) / 2.0, tw, th),
-        ),
+        rect: put(fw, fh, Rect::new((fw - tw) / 2.0, (fh - th) / 2.0, tw, th)),
         text,
         style,
     });
@@ -995,7 +1063,10 @@ impl Default for Viz {
     fn default() -> Self {
         Self {
             bars: std::array::from_fn(|_| {
-                crate::core::anim::Spring::new(0.3, crate::core::anim::SpringConfig::new(0.18, 0.55))
+                crate::core::anim::Spring::new(
+                    0.3,
+                    crate::core::anim::SpringConfig::new(0.18, 0.55),
+                )
             }),
             t: 0.0,
         }
@@ -1030,7 +1101,6 @@ impl Viz {
         out
     }
 }
-
 
 /// Atoll's spectrum: four 2 px bars, gap 2 px, centred in the pill glyph slot,
 /// heights from the visualizer springs. Drawn where the resting glyph would be.
@@ -1088,6 +1158,7 @@ fn scale_about_top(node: &mut Node, factor: f32) {
         Node::RoundRect { rect, .. }
         | Node::Text { rect, .. }
         | Node::Image { rect, .. }
+        | Node::Sprite { rect, .. }
         | Node::Bar { rect, .. }
         | Node::Glyph { rect, .. }
         | Node::Group { rect, .. } => rect.h = h * factor,
@@ -1111,6 +1182,7 @@ fn fade_node(node: &mut Node, opacity: f32) {
         Node::Glyph { color, .. } => *color = layout::fade(*color, opacity),
         // Images carry no colour of their own; their accent would come from state.
         Node::Image { .. } => {}
+        Node::Sprite { .. } => {}
         Node::Group { children, .. } => children.iter_mut().for_each(|c| fade_node(c, opacity)),
     }
 }
@@ -1593,8 +1665,14 @@ mod tests {
             assert_eq!(radii.top_left, -notch, "wing notch at {open}");
             assert_eq!(radii.top_right, -notch, "wing notch at {open}");
             let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
-            assert!((radii.bottom_left - want).abs() < 1e-3, "bottom_left at {open}");
-            assert!((radii.bottom_right - want).abs() < 1e-3, "bottom_right at {open}");
+            assert!(
+                (radii.bottom_left - want).abs() < 1e-3,
+                "bottom_left at {open}"
+            );
+            assert!(
+                (radii.bottom_right - want).abs() < 1e-3,
+                "bottom_right at {open}"
+            );
         }
     }
 
@@ -1627,10 +1705,15 @@ mod tests {
     }
 
     #[test]
-    fn panel_frame_contains_eight_tabs_with_8px_gaps() {
+    fn panel_frame_contains_every_tab_with_8px_gaps() {
         let f = panel();
         let rects = glyph_rects(&f);
-        assert_eq!(rects.len(), TABS.len(), "expected every tab: {:#?}", f.scene.nodes);
+        assert_eq!(
+            rects.len(),
+            TABS.len(),
+            "expected every tab: {:#?}",
+            f.scene.nodes
+        );
         for w in rects.windows(2) {
             assert!(w[0].max_x() <= w[1].x + 1e-4, "tabs overlap: {w:?}");
             assert!(
@@ -1993,14 +2076,34 @@ mod tests {
         v.media.playing = true;
         v.media.title = "Track".into();
         let playing = build(&v);
-        assert_eq!(
-            wide(&playing, 2.0),
-            4,
-            "four 2 px bars while a track plays"
-        );
+        assert_eq!(wide(&playing, 2.0), 4, "four 2 px bars while a track plays");
         v.media.playing = false;
         let paused = build(&v);
         assert_eq!(wide(&paused, 2.0), 0, "paused: the resting glyph, no bars");
+    }
+
+    #[test]
+    fn the_pet_replaces_the_glyph_only_while_idle() {
+        use crate::core::scene::ImageHandle;
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        v.media.playing = false;
+        v.pet = Some(crate::services::pet::PetFrame { handle: ImageHandle(7), frame: 2 });
+        let idle = build(&v);
+        let sprites: Vec<_> =
+            all_nodes(&idle).into_iter().filter(|n| matches!(n, Node::Sprite { .. })).collect();
+        assert_eq!(sprites.len(), 1, "one sprite in the collapsed pill");
+        if let Node::Sprite { handle, src, .. } = &sprites[0] {
+            assert_eq!(*handle, ImageHandle(7));
+            assert_eq!((src.x, src.y, src.w, src.h), crate::services::pet::frame_rect(2));
+        }
+        // Playing wins over the pet: the pill shows the spectrum, not the mascot.
+        v.media.playing = true;
+        let playing = build(&v);
+        assert_eq!(wide(&playing, 2.0), 4);
+        assert_eq!(
+            all_nodes(&playing).iter().filter(|n| matches!(n, Node::Sprite { .. })).count(),
+            0
+        );
     }
 
     /// Counts round-rects exactly `w` wide — the bars' signature.
@@ -2064,7 +2167,11 @@ mod tests {
         assert!(!swap.step(1.0 / 240.0), "idle swap must not want frames");
 
         swap.swap_to();
-        assert_eq!(swap.outgoing_opacity(), 1.0, "outgoing starts fully visible");
+        assert_eq!(
+            swap.outgoing_opacity(),
+            1.0,
+            "outgoing starts fully visible"
+        );
         assert_eq!(swap.rise(), 0.0, "incoming starts below and invisible");
 
         // One crossfade: the outgoing body fades while the incoming rises.

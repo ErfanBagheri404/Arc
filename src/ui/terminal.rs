@@ -52,7 +52,13 @@ pub fn visible_rows(fw: f32, fh: f32, top: f32) -> usize {
 ///
 /// `screen` is `None` before the shell has been started (or when it failed to
 /// start), which draws the hint row instead of an empty grid.
-pub fn content(fw: f32, fh: f32, top: f32, screen: Option<&Screen>, error: Option<&str>) -> Vec<Node> {
+pub fn content(
+    fw: f32,
+    fh: f32,
+    top: f32,
+    screen: Option<&Screen>,
+    error: Option<&str>,
+) -> Vec<Node> {
     let mut out = Vec::new();
     let size = font_size(fw);
     let line = size * LINE_EM;
@@ -76,7 +82,11 @@ pub fn content(fw: f32, fh: f32, top: f32, screen: Option<&Screen>, error: Optio
         };
         let h = crate::ui::line_height(&style);
         out.push(Node::Text {
-            rect: put(fw, fh, Rect::new(PANEL_PAD, top + TOP_PAD, fw - PANEL_PAD * 2.0, h)),
+            rect: put(
+                fw,
+                fh,
+                Rect::new(PANEL_PAD, top + TOP_PAD, fw - PANEL_PAD * 2.0, h),
+            ),
             text: msg,
             style,
         });
@@ -113,7 +123,18 @@ pub fn content(fw: f32, fh: f32, top: f32, screen: Option<&Screen>, error: Optio
         for (c, cell) in cells.iter().enumerate() {
             let fg = Some(cell.fg);
             if run_fg.is_some() && fg != run_fg {
-                push_run(&mut out, fw, fh, left, y, cw, run_col, &run, run_fg.unwrap(), cell.bold);
+                push_run(
+                    &mut out,
+                    fw,
+                    fh,
+                    left,
+                    y,
+                    cw,
+                    run_col,
+                    &run,
+                    run_fg.unwrap(),
+                    cell.bold,
+                );
                 run.clear();
                 run_col = c;
             }
@@ -121,7 +142,18 @@ pub fn content(fw: f32, fh: f32, top: f32, screen: Option<&Screen>, error: Optio
             run.push(cell.ch);
         }
         if !run.is_empty() {
-            push_run(&mut out, fw, fh, left, y, cw, run_col, &run, run_fg.unwrap(), false);
+            push_run(
+                &mut out,
+                fw,
+                fh,
+                left,
+                y,
+                cw,
+                run_col,
+                &run,
+                run_fg.unwrap(),
+                false,
+            );
         }
     }
     out
@@ -151,7 +183,12 @@ fn push_run(
         rect: put(
             fw,
             fh,
-            Rect::new(left + cw * col as f32, y, cw * text.chars().count() as f32, cw / CELL_EM * LINE_EM),
+            Rect::new(
+                left + cw * col as f32,
+                y,
+                cw * text.chars().count() as f32,
+                cw / CELL_EM * LINE_EM,
+            ),
         ),
         text: text.to_string(),
         style: TextStyle {

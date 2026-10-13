@@ -100,7 +100,11 @@ pub fn content(
 
         let value_style = TextStyle::numeric(12.0);
         out.push(Node::Text {
-            rect: put(fw, fh, Rect::new(value_x, text_y, VALUE_W, line_height(&value_style))),
+            rect: put(
+                fw,
+                fh,
+                Rect::new(value_x, text_y, VALUE_W, line_height(&value_style)),
+            ),
             text: row.value.clone(),
             style: value_style,
         });
@@ -152,7 +156,12 @@ fn process_block(
             rect: put(
                 fw,
                 fh,
-                Rect::new(crate::ui::PANEL_PAD + ROW_PAD, y + (h - lh) * 0.5, fw * 0.6, lh),
+                Rect::new(
+                    crate::ui::PANEL_PAD + ROW_PAD,
+                    y + (h - lh) * 0.5,
+                    fw * 0.6,
+                    lh,
+                ),
             ),
             text: row.name.clone(),
             style,
@@ -190,7 +199,11 @@ fn rows(stats: &Stats) -> Vec<Row<'_>> {
         Row {
             label: "Memory",
             value: m.memory_fraction().map_or("n/a".to_string(), |_| {
-                format!("{} / {}", gib(m.memory_used.unwrap_or(0)), gib(m.memory_total.unwrap_or(0)))
+                format!(
+                    "{} / {}",
+                    gib(m.memory_used.unwrap_or(0)),
+                    gib(m.memory_total.unwrap_or(0))
+                )
             }),
             history: stats.memory_history.samples(),
             // Stored as a fraction, so a full-height bar is 1.0.
@@ -321,7 +334,13 @@ mod tests {
     #[test]
     fn sparkline_bars_scale_to_the_declared_peak() {
         // A sample at the peak gets the full height; half the peak gets half.
-        let nodes = sparkline(400.0, 120.0, Rect::new(0.0, 0.0, 100.0, 18.0), &[100.0, 50.0], 100.0);
+        let nodes = sparkline(
+            400.0,
+            120.0,
+            Rect::new(0.0, 0.0, 100.0, 18.0),
+            &[100.0, 50.0],
+            100.0,
+        );
         let heights: Vec<f32> = nodes
             .iter()
             .filter_map(|n| match n {
@@ -337,7 +356,13 @@ mod tests {
     #[test]
     fn auto_scaled_sparkline_peaks_at_the_window_maximum() {
         // scale 0.0 means "fill to my own peak": the 40 sample must top out.
-        let nodes = sparkline(400.0, 120.0, Rect::new(0.0, 0.0, 100.0, 18.0), &[10.0, 40.0], 0.0);
+        let nodes = sparkline(
+            400.0,
+            120.0,
+            Rect::new(0.0, 0.0, 100.0, 18.0),
+            &[10.0, 40.0],
+            0.0,
+        );
         let h: Vec<f32> = nodes
             .iter()
             .filter_map(|n| match n {

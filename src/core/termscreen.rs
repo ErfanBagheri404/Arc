@@ -190,7 +190,10 @@ impl vte::Perform for Screen {
         _ignore: bool,
         action: char,
     ) {
-        let p: Vec<u16> = params.iter().map(|s| s.iter().fold(0u16, |a, n| a * 10 + n)).collect();
+        let p: Vec<u16> = params
+            .iter()
+            .map(|s| s.iter().fold(0u16, |a, n| a * 10 + n))
+            .collect();
         let arg = |i: usize, dflt: u16| p.get(i).copied().unwrap_or(dflt).max(1) as usize;
         match action {
             'A' => self.cur.0 = self.cur.0.saturating_sub(arg(0, 1)),
@@ -344,7 +347,9 @@ fn apply_sgr(attr: &mut Cell, p: &[u16]) {
 
 /// Nearest 256-color slot for a truecolor triple: the 6×6×6 cube.
 fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
-    16 + (r as u16 * 5 / 255) as u8 * 36 + (g as u16 * 5 / 255) as u8 * 6 + (b as u16 * 5 / 255) as u8
+    16 + (r as u16 * 5 / 255) as u8 * 36
+        + (g as u16 * 5 / 255) as u8 * 6
+        + (b as u16 * 5 / 255) as u8
 }
 
 /// The 256-color table as sRGB floats. Standard VGA base + 6×6×6 cube +

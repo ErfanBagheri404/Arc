@@ -143,7 +143,19 @@ mod tests {
         let mut l = HudLayer::default();
         let t0 = Instant::now();
         l.arm(bat(42), t0);
-        l.arm(Hud::Volume { percent: 42, muted: true }, t0 + Duration::from_millis(100));
-        assert_eq!(l.current(), Some(Hud::Volume { percent: 42, muted: true }));
+        l.arm(
+            Hud::Volume {
+                percent: 42,
+                muted: true,
+            },
+            t0 + Duration::from_millis(100),
+        );
+        assert_eq!(
+            l.current(),
+            Some(Hud::Volume {
+                percent: 42,
+                muted: true
+            })
+        );
     }
 }

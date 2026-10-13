@@ -166,10 +166,7 @@ pub fn content(fw: f32, fh: f32, top: f32, snap: &Snapshot) -> Vec<Node> {
         });
         let mut label = e.label();
         if label.chars().count() > PREVIEW_CHARS {
-            label = format!(
-                "{}…",
-                label.chars().take(PREVIEW_CHARS).collect::<String>()
-            );
+            label = format!("{}…", label.chars().take(PREVIEW_CHARS).collect::<String>());
         }
         out.push(Node::Text {
             rect: put(
@@ -322,8 +319,6 @@ mod tests {
                 ..Snapshot::default()
             },
         );
-        assert!(
-            texts(&nodes).iter().any(|t| t.contains("+3 more"))
-        );
+        assert!(texts(&nodes).iter().any(|t| t.contains("+3 more")));
     }
 }

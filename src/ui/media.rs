@@ -64,7 +64,10 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
     let art = Rect::new(crate::ui::PANEL_PAD, y0, ART, ART);
     out.push(Node::Image {
         rect: put(fw, fh, art),
-        handle: state.art.map(crate::core::scene::ImageHandle).unwrap_or_default(),
+        handle: state
+            .art
+            .map(crate::core::scene::ImageHandle)
+            .unwrap_or_default(),
         radii: CornerRadii::uniform(8.0),
     });
 
@@ -99,11 +102,7 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
     let cw = measure(&clock, &clock_style);
     let ch = line_height(&clock_style);
     out.push(Node::Text {
-        rect: put(
-            fw,
-            fh,
-            Rect::new(tx, bar_y - ch - 2.0, cw, ch),
-        ),
+        rect: put(fw, fh, Rect::new(tx, bar_y - ch - 2.0, cw, ch)),
         text: clock,
         style: clock_style,
     });
@@ -123,7 +122,11 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
             crate::services::media::Command::Previous => "prev",
             crate::services::media::Command::Next => "next",
             crate::services::media::Command::PlayPause => {
-                if state.playing { "pause" } else { "play" }
+                if state.playing {
+                    "pause"
+                } else {
+                    "play"
+                }
             }
             crate::services::media::Command::Seek(_) => "seek",
         };
@@ -173,7 +176,6 @@ pub fn transport(fw: f32, fh: f32, top: f32) -> Vec<(Rect, crate::services::medi
         .collect()
 }
 
-
 /// Helper: remaining-total label. The reference shows `−3:43` for the total.
 fn fmt_total(total_secs: f32, dur: Option<std::time::Duration>) -> String {
     match dur {
@@ -196,11 +198,7 @@ fn empty(fw: f32, fh: f32) -> Vec<Node> {
     let w = measure(msg, &style);
     let h = line_height(&style);
     vec![Node::Text {
-        rect: put(
-            fw,
-            fh,
-            Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h),
-        ),
+        rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
         text: msg.to_string(),
         style,
     }]

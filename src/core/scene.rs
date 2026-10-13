@@ -119,6 +119,14 @@ pub enum Node {
         /// Corner radii applied by clipping the image geometry.
         radii: CornerRadii,
     },
+    /// Sprite: a frame of an image (a spritesheet cell), cropped to `src`.
+    Sprite {
+        rect: Rect,
+        handle: ImageHandle,
+        /// Source rect in image-relative pixels, not clamped here: the crop
+        /// clips itself against the image bounds in the renderer.
+        src: Rect,
+    },
     /// Horizontal progress bar with a filled portion.
     Bar {
         rect: Rect,
@@ -144,6 +152,7 @@ impl Node {
             Node::RoundRect { rect, .. }
             | Node::Text { rect, .. }
             | Node::Image { rect, .. }
+            | Node::Sprite { rect, .. }
             | Node::Bar { rect, .. }
             | Node::Glyph { rect, .. }
             | Node::Group { rect, .. } => *rect,
@@ -170,6 +179,7 @@ impl Node {
             Node::RoundRect { rect, .. }
             | Node::Text { rect, .. }
             | Node::Image { rect, .. }
+            | Node::Sprite { rect, .. }
             | Node::Bar { rect, .. }
             | Node::Glyph { rect, .. }
             | Node::Group { rect, .. } => (rect.x, rect.y),
@@ -179,6 +189,7 @@ impl Node {
             Node::RoundRect { rect, .. }
             | Node::Text { rect, .. }
             | Node::Image { rect, .. }
+            | Node::Sprite { rect, .. }
             | Node::Bar { rect, .. }
             | Node::Glyph { rect, .. }
             | Node::Group { rect, .. } => *rect = new,

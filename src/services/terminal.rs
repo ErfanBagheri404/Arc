@@ -22,14 +22,14 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Console::{
-    ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, HPCON,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 use crate::core::termscreen::{Screen, COLS, ROWS};
@@ -282,7 +282,9 @@ fn reader(screen: Arc<Mutex<Screen>>, alive: Arc<AtomicBool>, reads: Handle) {
 
 /// Build a pipe pair with inheritable ends. Both handles are returned; the
 /// caller decides which it keeps.
-fn pipe_pair(sa: &windows::Win32::Security::SECURITY_ATTRIBUTES) -> Result<(Handle, Handle), String> {
+fn pipe_pair(
+    sa: &windows::Win32::Security::SECURITY_ATTRIBUTES,
+) -> Result<(Handle, Handle), String> {
     let (mut r, mut w) = (HANDLE::default(), HANDLE::default());
     unsafe {
         CreatePipe(&mut r, &mut w, Some(sa), 0).map_err(|e| e.code().0.to_string())?;
@@ -326,9 +328,8 @@ impl AttrList {
         }
         let buf = vec![0usize; size.div_ceil(std::mem::size_of::<usize>()) + 2];
         let mut buf: Box<[usize]> = buf.into_boxed_slice();
-        let list = windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST(
-            buf.as_mut_ptr() as _,
-        );
+        let list =
+            windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr() as _);
         unsafe {
             InitializeProcThreadAttributeList(Some(list), 1, Some(0), &mut size)
                 .map_err(|e| e.to_string())?;
@@ -384,13 +385,13 @@ fn spawn_shell(cmd: &mut [u16], pty: HPCON) -> Result<(AttrList, Handle), String
     attrs.set_pseudoconsole(pty)?;
 
     let mut info: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
-        info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-        // STARTF_USESTDHANDLES with all three std handles left null: the console
-        // subsystem then fills them from the attached pseudoconsole. Without the
-        // flag the child keeps whatever std handles this process had, so it prints
-        // to *our* stdout and the grid never sees a byte.
-        info.StartupInfo.dwFlags = windows::Win32::System::Threading::STARTF_USESTDHANDLES;
-        info.lpAttributeList = attrs.list;
+    info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    // STARTF_USESTDHANDLES with all three std handles left null: the console
+    // subsystem then fills them from the attached pseudoconsole. Without the
+    // flag the child keeps whatever std handles this process had, so it prints
+    // to *our* stdout and the grid never sees a byte.
+    info.StartupInfo.dwFlags = windows::Win32::System::Threading::STARTF_USESTDHANDLES;
+    info.lpAttributeList = attrs.list;
 
     let mut pi = PROCESS_INFORMATION::default();
     // bInheritHandles=false: the child reaches the console through the
@@ -412,12 +413,12 @@ fn spawn_shell(cmd: &mut [u16], pty: HPCON) -> Result<(AttrList, Handle), String
         .map_err(|e| e.to_string())
     };
     // The thread handle is ours to release; the process handle must outlive
-        // the console so drop can terminate the shell first (see `Pty`).
-        unsafe {
-            let _ = CloseHandle(pi.hThread);
-        }
-        let process = Handle::new(pi.hProcess);
-        r.map(|()| (attrs, process.expect("no process handle")))
+    // the console so drop can terminate the shell first (see `Pty`).
+    unsafe {
+        let _ = CloseHandle(pi.hThread);
+    }
+    let process = Handle::new(pi.hProcess);
+    r.map(|()| (attrs, process.expect("no process handle")))
 }
 
 #[cfg(test)]
@@ -449,7 +450,11 @@ mod tests {
             seen = t.screen().text().contains("arc_conpty_ok");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(seen, "grid never showed the echo output; screen was:\n{}", t.screen().text());
+        assert!(
+            seen,
+            "grid never showed the echo output; screen was:\n{}",
+            t.screen().text()
+        );
     }
 
     #[test]

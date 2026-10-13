@@ -13,26 +13,27 @@ pub use state::IslandState;
 use std::time::{Duration, Instant};
 
 use crate::platform::{Event, Overlay, Renderer};
-use crate::services::media::Media;
 use crate::services::audio::{self, Audio};
-use crate::services::clipboard::Clipboard;
-use crate::services::picker::Picker;
 use crate::services::calendars::Calendar;
+use crate::services::clipboard::Clipboard;
 use crate::services::downloads;
+use crate::services::media::Media;
+use crate::services::metrics::Sampler;
 use crate::services::net::{self, NetState};
-use crate::services::status;
+use crate::services::picker::Picker;
+use crate::services::power;
+use crate::services::processes::Processes;
 use crate::services::shelf::Shelf;
+use crate::services::status;
 use crate::services::terminal::Terminal;
 use crate::services::weather::Weather;
-use windows::Win32::Foundation::POINT;
-use std::path::PathBuf;
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-use crate::services::processes::Processes;
-use crate::services::metrics::Sampler;
-use crate::services::power;
+use crate::services::{pet, settings};
 use crate::ui;
 use hud::Hud;
+use std::path::PathBuf;
 use timer::{Timer, PRESETS};
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 /// The wall clock for a countdown, in the app thread.
 struct Countdown {
@@ -117,9 +118,15 @@ const NET_POLL: Duration = Duration::from_secs(2);
 /// Is either shift key down right now? Modifiers are not delivered as window
 /// messages to a click-through overlay, so this is polled at the click.
 fn shift_held() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT, VK_LSHIFT, VK_RSHIFT};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LSHIFT, VK_RSHIFT, VK_SHIFT,
+    };
     // SAFETY: a pure state query, no pointers.
-    unsafe { [VK_SHIFT, VK_LSHIFT, VK_RSHIFT].iter().any(|k| GetAsyncKeyState(k.0 as i32) < 0) }
+    unsafe {
+        [VK_SHIFT, VK_LSHIFT, VK_RSHIFT]
+            .iter()
+            .any(|k| GetAsyncKeyState(k.0 as i32) < 0)
+    }
 }
 
 /// A subscription's display name from its URL: the host, which is what the
@@ -293,6 +300,18 @@ pub fn run() -> std::process::ExitCode {
     // The tab selection and hover persist across frames; everything else the UI
     // needs is derived from the size springs.
     let mut view = ui::ViewState::default();
+    // The idle-notch pet: settings decide whether it shows and which petdex
+    // install it uses. Only the selected sheet is read and interned; the
+    // Settings picker needs the install count and the current name, nothing more.
+    let boot = settings::load();
+    let mut pet = pet::PetState::default();
+    let mut pet_on = settings::get_bool(&boot, "pet_enabled", true);
+    let pet_slug = settings::get_string(&boot, "pet_slug", "");
+    let pet_slugs = pet::installed();
+    pet.reload(&pet_slug);
+    view.pet_on = pet_on;
+    view.pet_count = pet_slugs.len();
+    view.pet_name = pet.name().map(str::to_string);
     overlay.show();
 
     // First paint before the loop: with no events yet, the dirty-frame loop would
@@ -306,12 +325,7 @@ pub fn run() -> std::process::ExitCode {
     view.island_width = state.logical_width();
     view.island_height = state.logical_height();
     let frame = ui::build(&view);
-    renderer.present(
-        &frame,
-        overlay.dpi().scale,
-        0.0,
-        state.body_offset_x(),
-    );
+    renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x());
 
     let mut last = Instant::now();
     loop {
@@ -420,11 +434,36 @@ pub fn run() -> std::process::ExitCode {
                         if let Some(item) = view.shelf.get(i) {
                             if shift_held() {
                                 crate::services::localsend::handoff(&[PathBuf::from(&item.path)]);
-                            } else if !crate::services::shelf::open(std::path::Path::new(&item.path)) {
+                            } else if !crate::services::shelf::open(std::path::Path::new(
+                                &item.path,
+                            )) {
                                 shelf.unpin(&item.path.clone());
                                 view.shelf = shelf.items().to_vec();
                             }
                         }
+                        redraw = true;
+                    } else if let Some(hit) = view.settings_hit(lx, ly) {
+                        // 0 toggles the pet; 1 cycles the installed pets. Both
+                        // persist immediately — settings are read at boot, so a
+                        // change that was not written would not survive a restart.
+                        let mut t = settings::load();
+                        if hit == 0 {
+                            pet_on = !pet_on;
+                            settings::set_bool(&mut t, "pet_enabled", pet_on);
+                        } else if !pet_slugs.is_empty() {
+                            let at = pet
+                                .slug()
+                                .and_then(|s| pet_slugs.iter().position(|k| k == s));
+                            let next = match at {
+                                Some(i) => pet_slugs[(i + 1) % pet_slugs.len()].clone(),
+                                None => pet_slugs[0].clone(),
+                            };
+                            pet.reload(&next);
+                            settings::set_string(&mut t, "pet_slug", &next);
+                        }
+                        settings::save(&t);
+                        view.pet_on = pet_on;
+                        view.pet_name = pet.name().map(str::to_string);
                         redraw = true;
                     } else if view.click_tab(lx, ly).is_some() {
                         redraw = true;
@@ -474,6 +513,14 @@ pub fn run() -> std::process::ExitCode {
                     redraw = true;
                 }
                 Event::Quit => return std::process::ExitCode::SUCCESS,
+                // Tray right-click → "Settings": force the panel open and land
+                // on the Settings tab. Not a toggle — the menu already made the
+                // intent unambiguous.
+                Event::OpenSettings => {
+                    state.expand();
+                    view.select_tab(ui::SETTINGS_TAB);
+                    redraw = true;
+                }
             }
         }
 
@@ -495,6 +542,18 @@ pub fn run() -> std::process::ExitCode {
 
         let now = Instant::now();
         let dt = now.duration_since(last).min(Duration::from_millis(100));
+
+        // The idle pet animates on its own clock: the frame index is a pure
+        // function of wall time, so a changed frame means repaint. Only the
+        // collapsed pill draws the sprite, so the panel-open case skips the
+        // check entirely — no 5 Hz wakeups while the user reads the panel.
+        if !state.expanded() && pet_on {
+            let frame = pet.frame_at(now);
+            if frame != view.pet {
+                view.pet = frame;
+                redraw = true;
+            }
+        }
 
         // HUD layer: expiry first (a HUD that just went away needs a repaint),
         // then the power poll. The getter is cheap and in-process, so it runs on
@@ -608,15 +667,20 @@ pub fn run() -> std::process::ExitCode {
 
         // The countdown runs on its own clock: while one is up the pill shows
         // it, so the frame is dirty every second regardless of hover or media.
-        if timer.view.remaining != view.timer.remaining || timer.view.preset != view.timer.preset
-        {
+        if timer.view.remaining != view.timer.remaining || timer.view.preset != view.timer.preset {
             view.timer = timer.view;
             redraw = true;
         }
         if timer.step(now) {
             // Hit zero: tray balloon, then the pill returns to idle.
             crate::platform::tray::notify("Timer", &format!("{} is up", view.timer.label()));
-            hud.arm(Hud::Timer { remaining: 0, running: false }, now);
+            hud.arm(
+                Hud::Timer {
+                    remaining: 0,
+                    running: false,
+                },
+                now,
+            );
             view.hud = hud.current();
             redraw = true;
         } else if timer.running {

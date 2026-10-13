@@ -61,8 +61,8 @@ pub fn brightness() -> Option<u8> {
         let mut cur = 0u32;
         let mut max = 100u32;
         // The binding returns the raw BOOL as i32.
-        let ok = GetMonitorBrightness(monitors[0].hPhysicalMonitor, &mut min, &mut cur, &mut max)
-            != 0;
+        let ok =
+            GetMonitorBrightness(monitors[0].hPhysicalMonitor, &mut min, &mut cur, &mut max) != 0;
         let _ = CloseHandle(monitors[0].hPhysicalMonitor);
         if !ok || max <= min {
             return None;

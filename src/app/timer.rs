@@ -23,7 +23,11 @@ pub struct Timer {
 impl Timer {
     /// Seconds left, formatted `MM:SS` (or `H:MM:SS` past an hour).
     pub fn label(&self) -> String {
-        let (h, m, s) = (self.remaining / 3600, (self.remaining % 3600) / 60, self.remaining % 60);
+        let (h, m, s) = (
+            self.remaining / 3600,
+            (self.remaining % 3600) / 60,
+            self.remaining % 60,
+        );
         if h > 0 {
             format!("{h}:{m:02}:{s:02}")
         } else {
@@ -81,12 +85,14 @@ mod tests {
 
     #[test]
     fn a_zero_timer_reads_as_finished() {
-        assert!((Timer {
-            remaining: 0,
-            preset: 0
-        }
-        .progress())
-            >= 1.0);
+        assert!(
+            (Timer {
+                remaining: 0,
+                preset: 0
+            }
+            .progress())
+                >= 1.0
+        );
     }
 
     #[test]

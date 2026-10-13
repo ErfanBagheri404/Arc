@@ -33,24 +33,24 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, UnregisterHotKey,
     HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_A,
     VK_Z,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible,
     PeekMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA,
-    GWL_STYLE, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
+    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE,
+    HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
-    WM_CHAR, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE, WM_WINDOWPOSCHANGING,
-    WNDCLASSEXW, WS_CAPTION,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MAXIMIZE, WS_POPUP,
+    SW_SHOWNOACTIVATE, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
+    WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE,
+    WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_MAXIMIZE, WS_POPUP,
 };
 
 use super::dpi::Dpi;
@@ -236,9 +236,7 @@ fn click_body_height(hwnd: HWND) -> i32 {
 
 fn click_body_width(hwnd: HWND) -> i32 {
     // Mirrors `pointer_over`: the live body width, centred in the fixed frame.
-    unsafe { userdata(hwnd) }
-        .map(|s| s.body_width)
-        .unwrap_or(0)
+    unsafe { userdata(hwnd) }.map(|s| s.body_width).unwrap_or(0)
 }
 
 /// Physical client origin of `hwnd`. The frame is borderless, so this is also
@@ -844,8 +842,7 @@ impl Overlay {
     pub fn set_body(&mut self, logical_w: f32, logical_h: f32, frame_w: f32) {
         let width = self.dpi().snap(logical_w) as i32;
         self.hover_width_px = width.max(1);
-        self.state.body_inset =
-            ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
+        self.state.body_inset = ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
         self.state.body_width = width.max(0);
         self.state.body_height = self.dpi().snap(logical_h) as i32;
         // Window coords (popup: client == window): body rect only.

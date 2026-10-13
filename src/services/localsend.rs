@@ -19,13 +19,26 @@ fn candidates() -> Vec<PathBuf> {
     // this machine; `%LOCALAPPDATA%\Programs\localsend` is the other known
     // location.
     if let Some(pf) = std::env::var_os("ProgramFiles") {
-        out.push(PathBuf::from(pf).join("LocalSend").join("localsend_app.exe"));
+        out.push(
+            PathBuf::from(pf)
+                .join("LocalSend")
+                .join("localsend_app.exe"),
+        );
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        out.push(PathBuf::from(local).join("Programs").join("localsend").join("localsend_app.exe"));
+        out.push(
+            PathBuf::from(local)
+                .join("Programs")
+                .join("localsend")
+                .join("localsend_app.exe"),
+        );
     }
     if let Some(pf86) = std::env::var_os("ProgramFiles(x86)") {
-        out.push(PathBuf::from(pf86).join("LocalSend").join("localsend_app.exe"));
+        out.push(
+            PathBuf::from(pf86)
+                .join("LocalSend")
+                .join("localsend_app.exe"),
+        );
     }
     out
 }
@@ -71,9 +84,15 @@ mod tests {
     #[test]
     fn detect_only_returns_paths_that_exist() {
         if let Some(p) = detect() {
-            assert!(p.is_file(), "detect returned a missing file: {}", p.display());
             assert!(
-                p.file_name().map(|n| n == "localsend_app.exe").unwrap_or(false),
+                p.is_file(),
+                "detect returned a missing file: {}",
+                p.display()
+            );
+            assert!(
+                p.file_name()
+                    .map(|n| n == "localsend_app.exe")
+                    .unwrap_or(false),
                 "unexpected exe name: {}",
                 p.display()
             );

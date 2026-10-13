@@ -84,10 +84,7 @@ unsafe fn vpn_name_in_table(table: *mut MIB_IF_TABLE2) -> Option<String> {
     // SAFETY: `table` is valid and owned by the caller.
     let table_ref = unsafe { &*table };
     let rows = unsafe {
-        std::slice::from_raw_parts(
-            table_ref.Table.as_ptr(),
-            table_ref.NumEntries as usize,
-        )
+        std::slice::from_raw_parts(table_ref.Table.as_ptr(), table_ref.NumEntries as usize)
     };
     rows.iter().find_map(|row| {
         let units: Vec<u16> = row
@@ -112,7 +109,7 @@ unsafe fn vpn_name_in_table(table: *mut MIB_IF_TABLE2) -> Option<String> {
 /// `None` — the "no name to show" case the HUD already handles.
 pub fn wifi_ssid() -> Option<String> {
     use windows::Win32::NetworkManagement::WiFi::{
-        wlan_intf_opcode_current_connection, wlan_interface_state_connected, WlanCloseHandle,
+        wlan_interface_state_connected, wlan_intf_opcode_current_connection, WlanCloseHandle,
         WlanEnumInterfaces, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface,
         WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST,
     };
@@ -144,14 +141,14 @@ pub fn wifi_ssid() -> Option<String> {
                 let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
                 let mut size = 0u32;
                 let query = WlanQueryInterface(
-                        handle,
-                        &iface.InterfaceGuid,
-                        wlan_intf_opcode_current_connection,
-                        None,
-                        &mut size,
-                        &mut data,
-                        None,
-                    );
+                    handle,
+                    &iface.InterfaceGuid,
+                    wlan_intf_opcode_current_connection,
+                    None,
+                    &mut size,
+                    &mut data,
+                    None,
+                );
                 if query != 0 || data.is_null() {
                     continue;
                 }

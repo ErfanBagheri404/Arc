@@ -14,13 +14,13 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_INFOTIP_FLAGS, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    Shell_NotifyIconW, NOTIFYICONDATAW, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_INFOTIP_FLAGS,
+    NOTIFY_ICON_MESSAGE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HICON, IMAGE_ICON,
-    LR_SHARED, LoadImageW, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SetForegroundWindow,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, LoadImageW,
+    SetForegroundWindow, TrackPopupMenu, HICON, IMAGE_ICON, LR_SHARED, MF_SEPARATOR, MF_STRING,
+    SM_CXSMICON, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER,
 };
 
 use super::Event;
@@ -31,6 +31,7 @@ pub const WM_TRAY: u32 = WM_USER + 1;
 
 const TRAY_UID: u32 = 1;
 const ID_QUIT: usize = 1;
+const ID_SETTINGS: usize = 2;
 
 // `NIM_*` and `NIF_*` are not re-exported by the `windows` crate at 0.62, but
 // their values are fixed part of the Win32 ABI — same pattern as
@@ -185,12 +186,24 @@ fn show_menu(hwnd: HWND) -> Option<Event> {
     // SAFETY: creates an owned menu; every early exit destroys it below.
     let menu = unsafe { CreatePopupMenu() }.ok()?;
     let quit = wide("Quit Arc");
-    // A separator above Quit mirrors every other tray menu; no other commands
-    // exist yet, so nothing else is added.
-    // SAFETY: menu is live, PCWSTR points at `quit` for the call's duration.
+    let open = wide("Settings");
+    // Settings first (the one command worth finding), then a separator, then
+    // Quit — the order every other tray menu uses.
+    // SAFETY: menu is live, PCWSTRs point at `open`/`quit` for the call.
     unsafe {
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_SETTINGS,
+            windows::core::PCWSTR(open.as_ptr()),
+        );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, windows::core::PCWSTR(quit.as_ptr()));
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_QUIT,
+            windows::core::PCWSTR(quit.as_ptr()),
+        );
     }
 
     let mut pt = POINT::default();
@@ -217,6 +230,8 @@ fn show_menu(hwnd: HWND) -> Option<Event> {
 
     if picked.0 as usize == ID_QUIT {
         Some(Event::Quit)
+    } else if picked.0 as usize == ID_SETTINGS {
+        Some(Event::OpenSettings)
     } else {
         None
     }

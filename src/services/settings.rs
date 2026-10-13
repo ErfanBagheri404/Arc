@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
 /// Where Arc keeps its files.
 pub fn app_dir() -> PathBuf {
@@ -21,7 +21,8 @@ pub fn app_dir() -> PathBuf {
 /// The roaming app-data dir, or `None` when it cannot be resolved.
 fn roaming_appdata() -> Option<PathBuf> {
     // SAFETY: SHGetKnownFolderPath writes a properly terminated buffer.
-    let p = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }.ok()?;
+    let p =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }.ok()?;
     let s = unsafe { p.to_string() }.ok()?;
     Some(PathBuf::from(s))
 }
@@ -46,15 +47,27 @@ pub fn save(table: &toml::Table) {
 
 /// A persistent boolean with a fallback.
 pub fn get_bool(table: &toml::Table, key: &str, fallback: bool) -> bool {
-    table
-        .get(key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(fallback)
+    table.get(key).and_then(|v| v.as_bool()).unwrap_or(fallback)
 }
 
 /// Write one boolean into a table.
 pub fn set_bool(table: &mut toml::Table, key: &str, value: bool) {
     table.insert(key.to_string(), toml::Value::Boolean(value));
+}
+
+/// A persistent string with a fallback.
+#[must_use]
+pub fn get_string(table: &toml::Table, key: &str, fallback: &str) -> String {
+    table
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+/// Write one string into a table.
+pub fn set_string(table: &mut toml::Table, key: &str, value: &str) {
+    table.insert(key.to_string(), toml::Value::String(value.to_string()));
 }
 
 #[cfg(test)]

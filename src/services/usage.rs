@@ -149,13 +149,10 @@ pub struct Snapshot {
 impl Snapshot {
     /// Runners that are installed, in display order.
     pub fn rows(&self) -> Vec<&Runner> {
-        [
-            &self.claude,
-            &self.codex,
-        ]
-        .into_iter()
-        .filter(|r| r.installed)
-        .collect()
+        [&self.claude, &self.codex]
+            .into_iter()
+            .filter(|r| r.installed)
+            .collect()
     }
 }
 
@@ -177,7 +174,10 @@ struct UsageBlock {
 impl UsageBlock {
     /// Billed tokens for one turn. Cached reads count: they are quota.
     fn total(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
     }
 }
 
@@ -250,11 +250,7 @@ fn now_secs() -> u64 {
 ///
 /// `now` is injected so tests are deterministic; production passes
 /// [`now_secs`].
-pub fn scan_runner(
-    name: &'static str,
-    home: &Path,
-    now: u64,
-) -> Runner {
+pub fn scan_runner(name: &'static str, home: &Path, now: u64) -> Runner {
     let installed = home.is_dir();
     if !installed {
         return Runner {
@@ -271,7 +267,12 @@ pub fn scan_runner(
     let mut limit = None;
     let mut read = 0usize;
     for (mtime, path) in files.into_iter().take(MAX_FILES) {
-        if mtime.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) < cutoff {
+        if mtime
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            < cutoff
+        {
             continue;
         }
         let Some((t, l)) = scan(&path) else { continue };
@@ -395,13 +396,21 @@ mod tests {
         assert_eq!(mk(80, 100).severity(), Severity::Warn);
         assert_eq!(mk(95, 100).severity(), Severity::Danger);
         assert!(mk(200, 100).fraction() <= 1.0, "bar never overflows");
-        assert!(mk(10, 0).fraction() <= 1.0, "zero limit must not divide by zero");
+        assert!(
+            mk(10, 0).fraction() <= 1.0,
+            "zero limit must not divide by zero"
+        );
     }
 
     #[test]
     fn snapshot_rows_hide_absent_runners() {
         let s = Snapshot {
-            claude: Runner { name: "Claude Code", tokens: 5, installed: true, ..Runner::default() },
+            claude: Runner {
+                name: "Claude Code",
+                tokens: 5,
+                installed: true,
+                ..Runner::default()
+            },
             codex: Runner::default(),
         };
         let rows = s.rows();

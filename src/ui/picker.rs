@@ -94,7 +94,12 @@ pub fn content(fw: f32, fh: f32, top: f32, picker: &Picker) -> Vec<Node> {
 
     // The swatch: a small square of the sampled color, right of the readout.
     if let Some(c) = current {
-        let swatch = Rect::new(r.max_x() - 12.0 - 20.0, r.y + (r.h - 20.0) * 0.5, 20.0, 20.0);
+        let swatch = Rect::new(
+            r.max_x() - 12.0 - 20.0,
+            r.y + (r.h - 20.0) * 0.5,
+            20.0,
+            20.0,
+        );
         out.push(Node::RoundRect {
             rect: put(fw, fh, swatch),
             radii: CornerRadii::uniform(5.0),
@@ -172,7 +177,9 @@ mod tests {
     #[test]
     fn swatches_stop_at_the_panel_bottom_so_nothing_draws_past_the_footer() {
         let nodes = content(1_000.0, 200.0, 90.0, &picker_with(40));
-        assert!(nodes.iter().all(|n| n.rect().max_y() <= 200.0 + layout::BOUNDS_EPSILON));
+        assert!(nodes
+            .iter()
+            .all(|n| n.rect().max_y() <= 200.0 + layout::BOUNDS_EPSILON));
     }
 
     #[test]

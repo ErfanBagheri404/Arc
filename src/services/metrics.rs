@@ -14,18 +14,16 @@
 
 use std::time::{Duration, Instant};
 
+use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetIfTable2, MIB_IF_TABLE2,
-};
+use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
-    PdhOpenQueryW, PDH_FMT_DOUBLE, PDH_FMT_COUNTERVALUE, PDH_HCOUNTER, PDH_HQUERY,
+    PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
 };
 use windows::Win32::System::SystemInformation::GlobalMemoryStatusEx;
 use windows::Win32::System::SystemInformation::MEMORYSTATUSEX;
-use windows::core::{HSTRING, PCWSTR};
 
 /// Samples retained per ring buffer: 60 s of 1 Hz history, enough for the
 /// Stats tab's sparkline without the memory cost of a long series.
@@ -161,7 +159,10 @@ impl Drop for Sampler {
 
 /// The sampler thread. Owns the PDH query for its whole life: opening a query
 /// per tick is what makes naive samplers read 0% forever.
-fn run(shared: std::sync::Arc<std::sync::Mutex<Stats>>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+fn run(
+    shared: std::sync::Arc<std::sync::Mutex<Stats>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let mut cpu = CpuCounter::open();
     let mut net = NetCounter::new();
     let disk = DiskCounter::new();
@@ -245,12 +246,7 @@ impl CpuCounter {
         }
         let mut counter = PDH_HCOUNTER::default();
         let added = unsafe {
-            PdhAddEnglishCounterW(
-                query,
-                &HSTRING::from(r"\% Processor Time"),
-                0,
-                &mut counter,
-            )
+            PdhAddEnglishCounterW(query, &HSTRING::from(r"\% Processor Time"), 0, &mut counter)
         };
         if added != ERROR_SUCCESS.0 {
             // SAFETY: `query` is ours and only opened here.
@@ -268,20 +264,16 @@ impl CpuCounter {
         }
         let mut value = PDH_FMT_COUNTERVALUE::default();
         // SAFETY: `counter` is live; `value` is a valid out of the right size.
-        let rc = unsafe {
-            PdhGetFormattedCounterValue(
-                self.counter,
-                PDH_FMT_DOUBLE,
-                None,
-                &mut value,
-            )
-        };
+        let rc =
+            unsafe { PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value) };
         if rc != ERROR_SUCCESS.0 {
             return None;
         }
         // A counter can be present but have no data yet (first tick, or a
         // suspended process); `PDH_CSTATUS_VALID_DATA` is the only honest state.
-        if value.CStatus != 0 /* PDH_CSTATUS_VALID_DATA */ {
+        if value.CStatus != 0
+        /* PDH_CSTATUS_VALID_DATA */
+        {
             return None;
         }
         // SAFETY: the union's double arm is written because CStatus said valid
@@ -323,7 +315,9 @@ impl NetCounter {
         }
         // SAFETY: PDH-free Win32 table: valid for NumEntries entries starting at
         // `Table`. Only the counters are read.
-        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+        };
         let mut down = 0u64;
         let mut up = 0u64;
         for r in rows {
@@ -375,10 +369,7 @@ impl DiskCounter {
     fn read(&self) -> (Option<u64>, Option<u64>) {
         let (mut avail, mut total) = (0u64, 0u64);
         // SAFETY: both out-params are valid; `path` outlives the call.
-        unsafe {
-            GetDiskFreeSpaceExW(&self.path, Some(&mut avail), Some(&mut total), None)
-        }
-        .ok();
+        unsafe { GetDiskFreeSpaceExW(&self.path, Some(&mut avail), Some(&mut total), None) }.ok();
         (Some(avail), Some(total))
     }
 }

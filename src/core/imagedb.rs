@@ -41,7 +41,11 @@ pub fn bytes(handle: ImageHandle) -> Option<Vec<u8>> {
     if handle.0 == 0 {
         return None;
     }
-    store().lock().expect("image registry poisoned").get(&handle.0).cloned()
+    store()
+        .lock()
+        .expect("image registry poisoned")
+        .get(&handle.0)
+        .cloned()
 }
 
 /// Registry entry count, for tests.

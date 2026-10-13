@@ -341,7 +341,11 @@ mod tests {
         assert_eq!(segs.len(), 4);
         // Order: TR wing, BR, BL, TL wing.
         assert_eq!(segs[0].to, (80.0, 20.0), "TR wing lands on the body side");
-        assert_eq!(segs[3].to, (0.0, 0.0), "TL wing returns to the frame corner");
+        assert_eq!(
+            segs[3].to,
+            (0.0, 0.0),
+            "TL wing returns to the frame corner"
+        );
         // Tangent horizontal at the screen edge, vertical on the body side.
         assert_eq!(segs[0].c1.1, rect.y);
         assert_eq!(segs[0].c2.0, 80.0);
@@ -363,7 +367,10 @@ mod tests {
             bottom_right: 16.0,
         };
         let (body_l, body_r, bl, br, wl, wr) = notch_metrics(&rect, radii);
-        assert!(body_l <= body_r, "wings must not cross: {body_l} > {body_r}");
+        assert!(
+            body_l <= body_r,
+            "wings must not cross: {body_l} > {body_r}"
+        );
         assert_eq!(wl, wr);
         assert!(bl >= 0.0 && br >= 0.0);
         let segs = squircle_segments(&rect, radii);
@@ -373,7 +380,10 @@ mod tests {
                     px >= rect.x - 1e-3 && px <= rect.max_x() + 1e-3,
                     "control escaped: {px}"
                 );
-                assert!(py >= rect.y - 1e-3 && py <= rect.max_y() + 1e-3, "escaped: {py}");
+                assert!(
+                    py >= rect.y - 1e-3 && py <= rect.max_y() + 1e-3,
+                    "escaped: {py}"
+                );
             }
         }
     }
@@ -421,10 +431,18 @@ mod tests {
     }
 
     /// Cubic Bézier at parameter `t`.
-    fn bezier_point(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+    fn bezier_point(
+        p0: (f32, f32),
+        p1: (f32, f32),
+        p2: (f32, f32),
+        p3: (f32, f32),
+        t: f32,
+    ) -> (f32, f32) {
         let u = 1.0 - t;
-        let x = u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0;
-        let y = u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1;
+        let x =
+            u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0;
+        let y =
+            u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1;
         (x, y)
     }
 

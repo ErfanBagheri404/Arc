@@ -131,7 +131,10 @@ impl Clipboard {
             .spawn(move || run(worker_entries, worker_flag))
             .ok();
 
-        Self { shared, enabled: flag }
+        Self {
+            shared,
+            enabled: flag,
+        }
     }
 
     /// Newest first.
@@ -261,7 +264,7 @@ fn read_text() -> Option<String> {
         let result = (|| {
             let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
             let lock = windows::Win32::System::Memory::GlobalLock(
-                windows::Win32::Foundation::HGLOBAL(handle.0)
+                windows::Win32::Foundation::HGLOBAL(handle.0),
             );
             if lock.is_null() {
                 return None;
@@ -290,7 +293,9 @@ fn read_text() -> Option<String> {
 /// `SetClipboardData`.
 fn set_text(text: &str) -> bool {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -381,7 +386,9 @@ mod tests {
 
     #[test]
     fn the_history_is_capped_at_max_entries() {
-        let mut e: Vec<Entry> = (0..MAX_ENTRIES + 10).map(|i| entry(&i.to_string())).collect();
+        let mut e: Vec<Entry> = (0..MAX_ENTRIES + 10)
+            .map(|i| entry(&i.to_string()))
+            .collect();
         e.truncate(MAX_ENTRIES);
         assert_eq!(e.len(), MAX_ENTRIES);
         assert_eq!(e[0].text, "0");

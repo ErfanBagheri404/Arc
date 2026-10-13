@@ -77,7 +77,12 @@ pub fn content(fw: f32, fh: f32, top: f32, snap: &Snapshot) -> Vec<Node> {
             rect: put(
                 fw,
                 fh,
-                Rect::new(card.x + ROW_PAD, text_y, card.w - ROW_PAD * 2.0 - VALUE_W, line_height(&label_style)),
+                Rect::new(
+                    card.x + ROW_PAD,
+                    text_y,
+                    card.w - ROW_PAD * 2.0 - VALUE_W,
+                    line_height(&label_style),
+                ),
             ),
             text: r.name.to_string(),
             style: label_style,
@@ -85,7 +90,16 @@ pub fn content(fw: f32, fh: f32, top: f32, snap: &Snapshot) -> Vec<Node> {
 
         let value_style = TextStyle::numeric(12.0);
         out.push(Node::Text {
-            rect: put(fw, fh, Rect::new(card.max_x() - ROW_PAD - VALUE_W, text_y, VALUE_W, line_height(&value_style))),
+            rect: put(
+                fw,
+                fh,
+                Rect::new(
+                    card.max_x() - ROW_PAD - VALUE_W,
+                    text_y,
+                    VALUE_W,
+                    line_height(&value_style),
+                ),
+            ),
             text: fmt_tokens(r.tokens),
             style: value_style,
         });

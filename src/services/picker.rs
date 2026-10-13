@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows::Win32::Graphics::Gdi::{GetPixel, GetDC, ReleaseDC};
+use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
 
 /// How many sampled pixels the trail keeps.
 pub const TRAIL: usize = 16;
@@ -110,7 +110,10 @@ impl Picker {
 
     /// The sampled trail, oldest first.
     pub fn trail(&self) -> Vec<Color> {
-        self.inner.lock().map(|i| i.trail.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .map(|i| i.trail.clone())
+            .unwrap_or_default()
     }
 
     /// How many colors are in the trail, without cloning them.

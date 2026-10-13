@@ -58,5 +58,7 @@ pub enum Event {
     FullscreenExit,
     /// Ask for a repaint (state changed, or a service published data).
     Redraw,
+    /// Tray "Settings…" picked: expand the island and land on the Settings tab.
+    OpenSettings,
     Quit,
 }

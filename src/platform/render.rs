@@ -570,6 +570,7 @@ impl Renderer {
                     );
                 }
             }
+            Node::Sprite { rect, handle, src } => self.draw_sprite(target, *rect, *handle, *src),
             Node::Glyph { rect, name, color } => self.fill_glyph(target, *rect, name, *color),
             Node::Group { children, .. } => {
                 for child in children {
@@ -803,6 +804,51 @@ impl Renderer {
             );
             target.PopLayer();
         }
+    }
+
+    /// Draw one frame of a spritesheet: the same bitmap path as `draw_image`,
+    /// but `src` crops the sheet to the frame. Used by the idle-notch pet,
+    /// where the sheet is one atlas and the frame is a 192x208 cell.
+    fn draw_sprite(
+        &mut self,
+        target: &ID2D1RenderTarget,
+        rect: Rect,
+        handle: ImageHandle,
+        src: Rect,
+    ) {
+        if rect.w <= 0.0 || rect.h <= 0.0 || src.w <= 0.0 || src.h <= 0.0 {
+            return;
+        }
+        let Some(source) = self.decoded(handle) else {
+            return;
+        };
+        let properties = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let Ok(bitmap) = (unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) })
+        else {
+            return;
+        };
+        let crop = D2D_RECT_F {
+            left: src.x,
+            top: src.y,
+            right: src.max_x(),
+            bottom: src.max_y(),
+        };
+        unsafe {
+            target.DrawBitmap(
+                &bitmap,
+                Some(&to_rect(rect)),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                Some(&crop),
+            )
+        };
     }
 
     fn brush(&self, target: &ID2D1RenderTarget, color: Rgba) -> Option<ID2D1SolidColorBrush> {

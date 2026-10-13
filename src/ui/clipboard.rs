@@ -47,18 +47,20 @@ const ROW_TRACK: Rgba = Rgba::rgba(1.0, 1.0, 1.0, 0.05);
 pub fn rows(fw: f32, top: f32, count: usize) -> Vec<Rect> {
     let y0 = top + CTL_TOP_PAD + CTL_H + CTL_GAP * 2.0;
     (0..count)
-        .map(|i| Rect::new(PANEL_PAD, y0 + (ROW_H + ROW_GAP) * i as f32, fw - PANEL_PAD * 2.0, ROW_H))
+        .map(|i| {
+            Rect::new(
+                PANEL_PAD,
+                y0 + (ROW_H + ROW_GAP) * i as f32,
+                fw - PANEL_PAD * 2.0,
+                ROW_H,
+            )
+        })
         .collect()
 }
 
 /// The consent control's rect: full width, directly under the tab strip.
 pub fn consent_rect(fw: f32, top: f32) -> Rect {
-    Rect::new(
-        PANEL_PAD,
-        top + CTL_TOP_PAD,
-        fw - PANEL_PAD * 2.0,
-        CTL_H,
-    )
+    Rect::new(PANEL_PAD, top + CTL_TOP_PAD, fw - PANEL_PAD * 2.0, CTL_H)
 }
 
 /// The capture / clear-all control's rect, directly below the consent row.
@@ -96,7 +98,11 @@ pub fn content(fw: f32, fh: f32, top: f32, entries: &[Entry], enabled: bool) -> 
         },
     ));
 
-    for (i, (r, entry)) in rows(fw, top, entries.len()).into_iter().zip(entries).enumerate() {
+    for (i, (r, entry)) in rows(fw, top, entries.len())
+        .into_iter()
+        .zip(entries)
+        .enumerate()
+    {
         if r.y >= fh || r.max_y() <= 0.0 {
             break;
         }
@@ -122,7 +128,12 @@ pub fn content(fw: f32, fh: f32, top: f32, entries: &[Entry], enabled: bool) -> 
             rect: put(
                 fw,
                 fh,
-                Rect::new(cell.x + (cell.w - gw) * 0.5, cell.y + (cell.h - gh) * 0.5, gw, gh),
+                Rect::new(
+                    cell.x + (cell.w - gw) * 0.5,
+                    cell.y + (cell.h - gh) * 0.5,
+                    gw,
+                    gh,
+                ),
             ),
             text: glyph,
             style,
@@ -138,7 +149,11 @@ pub fn content(fw: f32, fh: f32, top: f32, entries: &[Entry], enabled: bool) -> 
             };
             let ph = line_height(&preview);
             out.push(Node::Text {
-                rect: put(fw, fh, Rect::new(text_x, r.y + (r.h - ph) * 0.5, text_w, ph)),
+                rect: put(
+                    fw,
+                    fh,
+                    Rect::new(text_x, r.y + (r.h - ph) * 0.5, text_w, ph),
+                ),
                 text: entry.preview(PREVIEW_CHARS),
                 style: preview,
             });
@@ -216,12 +231,15 @@ mod tests {
         let nodes = content(1_000.0, 400.0, 60.0, &entries(3), false);
         assert_eq!(nodes.len(), 2);
         assert_eq!(
-            nodes.iter().filter(|n| matches!(n, Node::Text { .. })).count(),
+            nodes
+                .iter()
+                .filter(|n| matches!(n, Node::Text { .. }))
+                .count(),
             1
         );
-        assert!(nodes.iter().any(
-            |n| matches!(n, Node::Text { text, .. } if text == OFF_MSG)
-        ));
+        assert!(nodes
+            .iter()
+            .any(|n| matches!(n, Node::Text { text, .. } if text == OFF_MSG)));
     }
 
     #[test]

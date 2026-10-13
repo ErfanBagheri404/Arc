@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::GUID;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
-use windows::Win32::Media::Audio::{IMMDevice, IMMDeviceEnumerator, eConsole, eCapture, eRender};
+use windows::Win32::Media::Audio::{eCapture, eConsole, eRender, IMMDevice, IMMDeviceEnumerator};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -32,8 +32,7 @@ const MIC_HOLD: Duration = Duration::from_secs(2);
 
 /// The CLSID isn't vendored by the `windows` crate; this GUID is public and
 /// fixed for ever (mmdevapi.dll).
-const MMDEVICE_ENUMERATOR_CLSID: GUID =
-    GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
+const MMDEVICE_ENUMERATOR_CLSID: GUID = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
 
 /// Latest audio reading. All fields are `None` until the first successful poll.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -67,10 +66,7 @@ impl Audio {
 
     /// Current reading. Cheap: a mutex read.
     pub fn snapshot(&self) -> AudioState {
-        self.shared
-            .lock()
-            .map(|s| *s)
-            .unwrap_or_default()
+        self.shared.lock().map(|s| *s).unwrap_or_default()
     }
 }
 
@@ -80,9 +76,8 @@ fn run(shared: Arc<Mutex<AudioState>>) {
     // same model. Refusing audio (audio-less session) is fine.
     let _com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok();
 
-    let enumerator: windows::core::Result<IMMDeviceEnumerator> = unsafe {
-        CoCreateInstance(&MMDEVICE_ENUMERATOR_CLSID, None, CLSCTX_INPROC_SERVER)
-    };
+    let enumerator: windows::core::Result<IMMDeviceEnumerator> =
+        unsafe { CoCreateInstance(&MMDEVICE_ENUMERATOR_CLSID, None, CLSCTX_INPROC_SERVER) };
     let Ok(enumerator) = enumerator else {
         return; // no COM audio at all: publish nothing, stay quiet
     };
@@ -103,11 +98,10 @@ fn run(shared: Arc<Mutex<AudioState>>) {
         if volume.as_ref().and_then(|(_, v)| read_volume(v)).is_some() {
             // happy path below
         } else {
-            volume = default_endpoint(&enumerator, eRender, eConsole)
-                .and_then(|device| {
-                    let v = activate_endpoint_volume(&device).ok()?;
-                    Some((device, v))
-                });
+            volume = default_endpoint(&enumerator, eRender, eConsole).and_then(|device| {
+                let v = activate_endpoint_volume(&device).ok()?;
+                Some((device, v))
+            });
         }
         if let Some((_, v)) = volume.as_ref() {
             if let Some((vol, muted)) = read_volume(v) {
@@ -180,14 +174,15 @@ fn default_endpoint(
 fn activate_endpoint_volume(device: &IMMDevice) -> windows::core::Result<IAudioEndpointVolume> {
     // SAFETY: standard device activation; CLSCTX in-proc is what the endpoint
     // supports.
-    unsafe {
-        device.Activate::<IAudioEndpointVolume>(CLSCTX_INPROC_SERVER, None)
-    }
+    unsafe { device.Activate::<IAudioEndpointVolume>(CLSCTX_INPROC_SERVER, None) }
 }
 
 fn read_volume(v: &IAudioEndpointVolume) -> Option<(u8, bool)> {
     // SAFETY: scalar getters on a live endpoint.
     let level = unsafe { v.GetMasterVolumeLevelScalar() }.ok()?;
-    let muted = unsafe { v.GetMute() }.ok().map(|b| b.as_bool()).unwrap_or(false);
+    let muted = unsafe { v.GetMute() }
+        .ok()
+        .map(|b| b.as_bool())
+        .unwrap_or(false);
     Some((((level * 100.0).round() as u8).min(100), muted))
 }

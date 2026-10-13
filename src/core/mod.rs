@@ -11,9 +11,9 @@
 #[allow(dead_code)]
 pub mod anim;
 pub mod color;
-pub mod imagedb;
 #[allow(dead_code)]
 pub mod geom;
+pub mod imagedb;
 #[allow(dead_code)]
 pub mod scene;
 #[allow(dead_code)]

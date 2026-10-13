@@ -22,8 +22,8 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::System::ProcessStatus::EnumProcesses;
 use windows::Win32::System::Threading::{
-    GetProcessId, GetProcessTimes, OpenProcess,
-    QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessId, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 /// How many rows the panel shows.
@@ -198,7 +198,9 @@ fn process_name(pid: u32) -> String {
     let mut len = MAX;
     // SAFETY: `buf` is `MAX` wide; the API truncates to `len` and writes back
     // the number of characters used.
-    let ok = unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) };
+    let ok = unsafe {
+        QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
+    };
     unsafe { CloseHandle(h).ok() };
     if ok.is_err() || len == 0 {
         return format!("pid {pid}");
