@@ -43,6 +43,9 @@ pub struct AudioState {
     pub muted: Option<bool>,
     /// Mic capturing above threshold, held through short gaps.
     pub mic_active: bool,
+    /// Output peak 0..=1, the render endpoint's last reading. `None` until the
+    /// first successful poll; the visualizer chases this.
+    pub peak: Option<f32>,
 }
 
 pub struct Audio {
@@ -72,6 +75,7 @@ impl Audio {
 }
 
 fn run(shared: Arc<Mutex<AudioState>>) {
+    let mut out_meter: Option<IAudioMeterInformation> = None;
     // SAFETY: MTA apartment for this thread alone; the media service uses the
     // same model. Refusing audio (audio-less session) is fine.
     let _com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok();
@@ -109,6 +113,25 @@ fn run(shared: Arc<Mutex<AudioState>>) {
             if let Some((vol, muted)) = read_volume(v) {
                 state.volume = Some(vol);
                 state.muted = Some(muted);
+            }
+        }
+
+        // Output: peak meter for the visualizer. The volume endpoint already
+        // holds the render device, so activating the meter on it is one call;
+        // re-acquired together with the volume endpoint when it dies.
+        if let Some((device, _)) = volume.as_ref() {
+            if out_meter.is_none() {
+                // SAFETY: in-proc activation of the standard meter interface.
+                out_meter = unsafe {
+                    device.Activate::<IAudioMeterInformation>(CLSCTX_INPROC_SERVER, None)
+                }
+                .ok();
+            }
+            if let Some(m) = out_meter.as_ref() {
+                // SAFETY: plain out-param read.
+                if let Ok(p) = unsafe { m.GetPeakValue() } {
+                    state.peak = Some(p);
+                }
             }
         }
 

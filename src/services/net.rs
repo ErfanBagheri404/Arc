@@ -28,13 +28,17 @@ pub struct NetState {
     pub online: bool,
     /// Name of a VPN/tunnel adapter that is present, e.g. `WireGuard Tunnel`.
     pub vpn: Option<String>,
+    /// The WiFi network we are joined to, when it can be named at all.
+    pub ssid: Option<String>,
 }
 
-/// Read both now. At the HUD's 1 Hz this is two syscall-cheap queries.
+/// Read all three now. At the HUD's 2 Hz this is a handful of syscall-cheap
+/// queries; the WiFi one no-ops on machines without a wireless radio.
 pub fn sample() -> NetState {
     NetState {
         online: online(),
         vpn: vpn_tunnel(),
+        ssid: wifi_ssid(),
     }
 }
 
@@ -100,6 +104,94 @@ unsafe fn vpn_name_in_table(table: *mut MIB_IF_TABLE2) -> Option<String> {
     })
 }
 
+/// The SSID of the current WiFi connection, when there is one.
+///
+/// Open a client handle, enumerate interfaces, ask the first connected one for
+/// its `wlan_intf_opcode_current_connection` blob, free it, close the handle.
+/// Machines with no radio answer the enum with an empty list, and this returns
+/// `None` — the "no name to show" case the HUD already handles.
+pub fn wifi_ssid() -> Option<String> {
+    use windows::Win32::NetworkManagement::WiFi::{
+        wlan_intf_opcode_current_connection, wlan_interface_state_connected, WlanCloseHandle,
+        WlanEnumInterfaces, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface,
+        WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST,
+    };
+
+    // SAFETY: all four WLAN calls below are plain out-param reads on handles
+    // this function opens and closes within its own scope.
+    let mut handle = Default::default();
+    // SAFETY: out-params written by the service.
+    if unsafe { WlanOpenHandle(2, None, &mut Default::default(), &mut handle) } != 0 {
+        return None;
+    }
+
+    let name = (|| {
+        let mut list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+        // SAFETY: `list` is a live out-param written only on success.
+        if unsafe { WlanEnumInterfaces(handle, None, &mut list) } != 0 || list.is_null() {
+            return None;
+        }
+        // SAFETY: `list` is valid until `WlanFreeMemory`; `ssid` is owned, so
+        // nothing borrows the allocation across the free at the bottom.
+        let ssid = unsafe {
+            let list_ref = &*list;
+            let mut ssid = None;
+            for i in 0..list_ref.dwNumberOfItems {
+                let iface = &list_ref.InterfaceInfo[i as usize];
+                if iface.isState != wlan_interface_state_connected {
+                    continue;
+                }
+                let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+                let mut size = 0u32;
+                let query = unsafe {
+                    WlanQueryInterface(
+                        handle,
+                        &iface.InterfaceGuid,
+                        wlan_intf_opcode_current_connection,
+                        None,
+                        &mut size,
+                        &mut data,
+                        None,
+                    )
+                };
+                if query != 0 || data.is_null() {
+                    continue;
+                }
+                // SAFETY: the blob for this opcode is a `WLAN_CONNECTION_ATTRIBUTES`.
+                let conn = unsafe { &*(data as *const WLAN_CONNECTION_ATTRIBUTES) };
+                let raw = &conn.wlanAssociationAttributes.dot11Ssid;
+                let n = (raw.uSSIDLength as usize).min(raw.ucSSID.len());
+                if n > 0 {
+                    ssid = Some(ssid_string(&raw.ucSSID[..n]));
+                }
+                // SAFETY: `data` is a service allocation, freed immediately.
+                unsafe { WlanFreeMemory(data as *const _) };
+                if ssid.is_some() {
+                    break;
+                }
+            }
+            let _ = list_ref;
+            ssid
+        };
+        // SAFETY: `list` is the owned allocation from `WlanEnumInterfaces`.
+        unsafe { WlanFreeMemory(list as *const _) };
+        ssid
+    })();
+
+    // SAFETY: the handle was opened above and is closed exactly once.
+    unsafe { WlanCloseHandle(handle, None) };
+    name
+}
+
+/// SSIDs are UTF-8 by the 802.11 standard; latin-1 is the fallback for the
+/// access points that ignore it, so a hotspot name never becomes U+FFFD.
+fn ssid_string(raw: &[u8]) -> String {
+    String::from_utf8(raw.to_vec())
+        .unwrap_or_else(|_| raw.iter().map(|&b| b as char).collect())
+        .trim()
+        .to_string()
+}
+
 /// Every VPN driver Windows ships describes its adapter with `VPN`,
 /// `Tunnel` or `WireGuard` in the name. Case-insensitive, so a user's custom
 /// description ("home VPN") classifies too.
@@ -129,6 +221,9 @@ mod tests {
     fn sampling_never_panics_and_is_consistent_with_its_parts() {
         let s = sample();
         assert_eq!(s.online, online());
-        assert_eq!(s.vpn, vpn_tunnel());
+        // VPN name, when present, actually looks like one.
+        if let Some(v) = &s.vpn {
+            assert!(looks_like_vpn(v), "{v}");
+        }
     }
 }

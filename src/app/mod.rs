@@ -20,6 +20,7 @@ use crate::services::picker::Picker;
 use crate::services::calendars::Calendar;
 use crate::services::downloads;
 use crate::services::net::{self, NetState};
+use crate::services::status;
 use crate::services::shelf::Shelf;
 use crate::services::terminal::Terminal;
 use crate::services::weather::Weather;
@@ -209,9 +210,9 @@ fn net_hud(
         None => s.vpn.as_ref().map(|n| hud::Hud::Vpn(Some(n.clone()))),
         Some(prev) => {
             if prev.online && !s.online {
-                Some(hud::Hud::Online(false))
+                Some(hud::Hud::Online(false, None))
             } else if !prev.online && s.online {
-                Some(hud::Hud::Online(true))
+                Some(hud::Hud::Online(true, s.ssid.clone()))
             } else if prev.vpn != s.vpn {
                 Some(hud::Hud::Vpn(s.vpn.clone()))
             } else {
@@ -259,6 +260,8 @@ pub fn run() -> std::process::ExitCode {
     let mut last_power = Instant::now() - POWER_POLL;
     let mut last_net = Instant::now() - NET_POLL;
     let mut last_net_state: Option<NetState> = None;
+    let mut last_focus: Option<bool> = None;
+    let mut last_brightness: Option<u8> = None;
     let mut last_power_state: Option<power::Power> = None;
     // Audio (volume / mic) runs on its own worker thread — the COM pointer and
     // 250 ms cadence live there, the app only reads the snapshot.
@@ -510,7 +513,26 @@ pub fn run() -> std::process::ExitCode {
         }
         if now.duration_since(last_net) >= NET_POLL {
             last_net = now;
-            let armed = net_hud(&net::sample(), &mut last_net_state, now, &mut hud);
+            let mut armed = net_hud(&net::sample(), &mut last_net_state, now, &mut hud);
+            // Focus: transition-only, same rule as the other HUDs.
+            let focus = status::focus_on();
+            if last_focus.replace(focus) == Some(!focus) {
+                hud.arm(hud::Hud::Focus(focus), now);
+                armed = true;
+            }
+            // Brightness: DDC/CI read; arm on a real change (hotkey, slider).
+            // Debounced by 2 %: the panel's own ramp crosses many values per
+            // key-hold, and the HUD's re-arm timer already handles a stream.
+            if let Some(b) = status::brightness() {
+                let jumped = match last_brightness.replace(b) {
+                    Some(prev) => prev.abs_diff(b) >= 2,
+                    None => false,
+                };
+                if jumped {
+                    hud.arm(hud::Hud::Brightness(b), now);
+                    armed = true;
+                }
+            }
             if armed {
                 view.hud = hud.current();
                 redraw = true;
@@ -607,7 +629,17 @@ pub fn run() -> std::process::ExitCode {
         // The tab swap runs its own springs; while either is live the island
         // repaints so the crossfade/rise plays out.
         let swap_busy = view.tab_swap.step(dt.as_secs_f32());
-        let animating = state.step_dt(dt.as_secs_f32()) || swap_busy;
+        // Visualizer bars chase the output meter (or idle-shimmer when paused).
+        // One peak feeds all four bars with a slight per-bar slant so the
+        // row reads as a spectrum rather than a solid block.
+        let p = audio.snapshot().peak.unwrap_or(0.0);
+        let lvl = |i: usize| (p * (1.0 - 0.12 * i as f32)).max(0.0);
+        let viz_busy = view.viz.step(
+            dt.as_secs_f32(),
+            [lvl(0), lvl(1), lvl(2), lvl(3)],
+            view.media.playing,
+        );
+        let animating = state.step_dt(dt.as_secs_f32()) || swap_busy || viz_busy;
 
         // A hidden island is not just un-drawn: it is removed from the screen so
         // it cannot sit over the fullscreen app it is hiding for.

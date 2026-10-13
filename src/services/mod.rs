@@ -19,3 +19,4 @@ pub mod processes;
 pub mod power;
 pub mod usage;
 pub mod net;
+pub mod status;

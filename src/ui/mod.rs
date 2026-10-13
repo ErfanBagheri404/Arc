@@ -170,6 +170,8 @@ pub struct ViewState {
     /// Content swap motion for the iOS-style tab transition: fades out
     /// then the new tab rises in. Settled (rise = 1) when idle.
     pub tab_swap: TabSwap,
+    /// Four-bar audio visualizer, stepped by the app thread.
+    pub viz: Viz,
     /// The tab the swap is leaving behind; its body is what fades out.
     /// Only meaningful while `tab_swap` is animating.
     pub prev_tab: usize,
@@ -455,12 +457,20 @@ pub fn build(state: &ViewState) -> Frame {
                 }
             }
             None => {
-                let g = PILL_GLYPH;
-                scene.push(Node::RoundRect {
-                    rect: put(fw, fh, Rect::new((fw - g) / 2.0, (fh - g) / 2.0, g, g)),
-                    radii: CornerRadii::uniform(PILL_GLYPH_RADIUS),
-                    fill: layout::fade(PILL_GREY, glyph_opacity),
-                });
+                // Atoll swaps the collapsed glyph for its four-bar spectrum
+                // while a track plays; paused, the plain resting glyph is back.
+                if state.media.playing {
+                    for n in viz_bars(fw, fh, state, glyph_opacity) {
+                        scene.push(n);
+                    }
+                } else {
+                    let g = PILL_GLYPH;
+                    scene.push(Node::RoundRect {
+                        rect: put(fw, fh, Rect::new((fw - g) / 2.0, (fh - g) / 2.0, g, g)),
+                        radii: CornerRadii::uniform(PILL_GLYPH_RADIUS),
+                        fill: layout::fade(PILL_GREY, glyph_opacity),
+                    });
+                }
             }
         }
     }
@@ -883,9 +893,13 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
             ),
             None,
         ),
-        Hud::Online(online) => (
+        Hud::Online(online, ssid) => (
             if *online { PILL_GREEN } else { PILL_AMBER },
-            if *online { "online" } else { "offline" }.to_string(),
+            match (online, ssid) {
+                (false, _) => "offline".to_string(),
+                (true, Some(s)) => format!("WiFi \u{b7} {}", s.chars().take(18).collect::<String>()),
+                (true, None) => "online".to_string(),
+            },
             None,
         ),
         Hud::Vpn(name) => (
@@ -896,6 +910,12 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
             },
             None,
         ),
+        Hud::Focus(on) => (
+            if *on { PILL_AMBER } else { PILL_GREY },
+            if *on { "focus on" } else { "focus off" }.to_string(),
+            None,
+        ),
+        Hud::Brightness(pct) => (PILL_GREEN, format!("{pct} %"), Some(*pct as f32 / 100.0)),
     };
 
     let mut out = vec![Node::RoundRect {
@@ -948,6 +968,85 @@ fn content_rows(fw: f32, fh: f32, top: f32, state: &ViewState) -> Vec<Node> {
                 rect: put(fw, fh, Rect::new(left, y, w, h)),
                 radii: CornerRadii::uniform(ROW_RADIUS),
                 fill: Rgba::rgba(1.0, 1.0, 1.0, if hovered { 0.10 } else { 0.04 }),
+            }
+        })
+        .collect()
+}
+
+/// Four-bar audio visualizer (Atoll's `AudioSpectrum`): springs chase the
+/// output meter, so bars decay smoothly between poll ticks and never teleport.
+/// Pure state — the app thread steps it; `build` only reads heights.
+#[derive(Debug, Clone)]
+pub struct Viz {
+    bars: [crate::core::anim::Spring; 4],
+    /// Wall-clock phase for the idle shimmer when nothing is playing.
+    t: f32,
+}
+
+impl Default for Viz {
+    fn default() -> Self {
+        Self {
+            bars: std::array::from_fn(|_| {
+                crate::core::anim::Spring::new(0.3, crate::core::anim::SpringConfig::new(0.18, 0.55))
+            }),
+            t: 0.0,
+        }
+    }
+}
+
+impl Viz {
+    /// Drive toward a fresh meter reading. `levels` are 0..=1 peaks; the app
+    /// thread passes the same snapshot every frame, so springs do the smoothing.
+    pub fn step(&mut self, dt: f32, levels: [f32; 4], playing: bool) -> bool {
+        self.t += dt;
+        let mut moved = false;
+        for (i, bar) in self.bars.iter_mut().enumerate() {
+            // Idle: a gentle travelling wave so the bars read alive but calm.
+            let target = if playing {
+                levels[i].clamp(0.08, 1.0)
+            } else {
+                0.18 + 0.10 * (self.t * 2.2 + i as f32 * 0.9).sin()
+            };
+            bar.set_target(target);
+            moved |= bar.step(dt);
+        }
+        moved
+    }
+
+    /// Current heights, 0..=1.
+    pub fn heights(&self) -> [f32; 4] {
+        let mut out = [0.0f32; 4];
+        for (o, b) in out.iter_mut().zip(self.bars.iter()) {
+            *o = b.value().clamp(0.05, 1.0);
+        }
+        out
+    }
+}
+
+
+/// Atoll's spectrum: four 2 px bars, gap 2 px, centred in the pill glyph slot,
+/// heights from the visualizer springs. Drawn where the resting glyph would be.
+fn viz_bars(fw: f32, fh: f32, state: &ViewState, alpha: f32) -> Vec<Node> {
+    const BAR_W: f32 = 2.0;
+    const GAP: f32 = 2.0;
+    const MAX_H: f32 = 14.0;
+    let heights = state.viz.heights();
+    let total = BAR_W * 4.0 + GAP * 3.0;
+    let x0 = (fw - total) / 2.0;
+    let cy = fh / 2.0;
+    heights
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let h = (MAX_H * h).max(3.0);
+            Node::RoundRect {
+                rect: put(
+                    fw,
+                    fh,
+                    Rect::new(x0 + i as f32 * (BAR_W + GAP), cy - h / 2.0, BAR_W, h),
+                ),
+                radii: CornerRadii::uniform(BAR_W / 2.0),
+                fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.95), alpha),
             }
         })
         .collect()
@@ -1154,12 +1253,13 @@ mod tests {
         v.media.playing = true;
         v.media.position = std::time::Duration::from_secs(30);
         v.media.duration = Some(std::time::Duration::from_secs(60));
-        // Playing: the bar's group + two leaves (track, accent fill) join in.
+        // Playing: the bar's group + two leaves (track, accent fill) join in,
+        // and the glyph slot now holds the four spectrum bars instead.
         let f = build(&v);
-        assert_eq!(all_nodes(&f).len(), 5);
+        assert_eq!(all_nodes(&f).len(), 5 - 1 + 4);
         // Live stream with unknown duration: no bar to pin at zero.
         v.media.duration = None;
-        assert_eq!(all_nodes(&build(&v)).len(), 2);
+        assert_eq!(all_nodes(&build(&v)).len(), 1 + 4);
     }
 
     #[test]
@@ -1877,6 +1977,33 @@ mod tests {
         style.align = Align::Start;
         let (rect, _) = find_text(&panel(), APP_TITLE).unwrap();
         assert!((rect.w - measure(APP_TITLE, &style)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_spectrum_replaces_the_glyph_only_while_playing() {
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        v.media.playing = true;
+        v.media.title = "Track".into();
+        let playing = build(&v);
+        assert_eq!(
+            wide(&playing, 2.0),
+            4,
+            "four 2 px bars while a track plays"
+        );
+        v.media.playing = false;
+        let paused = build(&v);
+        assert_eq!(wide(&paused, 2.0), 0, "paused: the resting glyph, no bars");
+    }
+
+    /// Counts round-rects exactly `w` wide — the bars' signature.
+    fn wide(f: &Frame, w: f32) -> usize {
+        all_nodes(f)
+            .iter()
+            .filter(|n| match n {
+                Node::RoundRect { rect, .. } => (rect.w - w).abs() < 0.01,
+                _ => false,
+            })
+            .count()
     }
 
     #[test]

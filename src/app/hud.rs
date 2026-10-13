@@ -33,10 +33,15 @@ pub enum Hud {
         remaining: u32,
         running: bool,
     },
-    /// Connectivity change: `false` is the offline warning, `true` the recovery.
-    Online(bool),
+    /// Connectivity change: `false` is the offline warning, `true` the recovery
+    /// with the network name when the SSID is known.
+    Online(bool, Option<String>),
     /// VPN indicator with the tunnel adapter's display name.
     Vpn(Option<String>),
+    /// Focus / windowless mode entered or left.
+    Focus(bool),
+    /// Brightness changed: the OSD number, 0..=100.
+    Brightness(u8),
 }
 
 /// Battery/AC state, straight from `GetSystemPowerStatus`.
