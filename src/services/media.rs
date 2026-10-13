@@ -102,10 +102,7 @@ impl Media {
 
     /// Last published snapshot. Never blocks on the worker.
     pub fn snapshot(&self) -> MediaState {
-        self.state
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.state.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Queue a transport action. Silently dropped if the worker has exited.
@@ -150,12 +147,20 @@ fn run(state: Arc<Mutex<MediaState>>, queue: Receiver<Command>, stop: Arc<Mutex<
                 if snapshot.art.is_none() {
                     // Cover fetch is the expensive part; only when the track key
                     // changed, and only for the current session.
-                    let key = format!("{}\u{1}{}\u{1}{}", snapshot.source, snapshot.title, snapshot.album);
+                    let key = format!(
+                        "{}\u{1}{}\u{1}{}",
+                        snapshot.source, snapshot.title, snapshot.album
+                    );
                     if last_art_key.as_deref() != Some(key.as_str()) {
-                        last_art_key = Some(key);
                         if let Some((handle, accent)) = fetch_art(&session) {
                             snapshot.art = Some(handle.0);
                             snapshot.accent = Some(accent);
+                            // Mark the track covered only once the bytes actually
+                            // arrived. A session that reports its title before its
+                            // thumbnail stream is ready must be retried next poll,
+                            // not locked out until the track changes -- otherwise
+                            // the art stays a flat placeholder forever.
+                            last_art_key = Some(key);
                         }
                     }
                 }
@@ -196,10 +201,22 @@ fn read(
         state.source = source.to_string();
     }
 
-    if let Ok(properties) = session.TryGetMediaPropertiesAsync().and_then(|op| op.join()) {
-        state.title = properties.Title().map(|s| s.to_string()).unwrap_or_default();
-        state.artist = properties.Artist().map(|s| s.to_string()).unwrap_or_default();
-        state.album = properties.AlbumTitle().map(|s| s.to_string()).unwrap_or_default();
+    if let Ok(properties) = session
+        .TryGetMediaPropertiesAsync()
+        .and_then(|op| op.join())
+    {
+        state.title = properties
+            .Title()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        state.artist = properties
+            .Artist()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        state.album = properties
+            .AlbumTitle()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
     }
 
     if let Ok(timeline) = session.GetTimelineProperties() {
@@ -282,7 +299,9 @@ fn fetch_art(
     Some((handle, accent))
 }
 
-fn read_stream(stream: &windows::Storage::Streams::IRandomAccessStreamWithContentType) -> Option<Vec<u8>> {
+fn read_stream(
+    stream: &windows::Storage::Streams::IRandomAccessStreamWithContentType,
+) -> Option<Vec<u8>> {
     let size = stream.Size().ok()?;
     if size == 0 || size > 16 * 1024 * 1024 {
         return None;
@@ -290,7 +309,9 @@ fn read_stream(stream: &windows::Storage::Streams::IRandomAccessStreamWithConten
     let size = size as u32;
     let input = stream.clone().cast::<IInputStream>().ok()?;
     let reader = DataReader::CreateDataReader(&input).ok()?;
-    reader.SetInputStreamOptions(InputStreamOptions::ReadAhead).ok()?;
+    reader
+        .SetInputStreamOptions(InputStreamOptions::ReadAhead)
+        .ok()?;
     reader.LoadAsync(size).ok()?.join().ok()?;
     let mut bytes = vec![0u8; size as usize];
     reader.ReadBytes(&mut bytes).ok()?;
@@ -308,12 +329,8 @@ fn decode_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     use windows::Win32::UI::Shell::SHCreateMemStream;
 
     unsafe {
-        let factory: IWICImagingFactory = CoCreateInstance(
-            &CLSID_WICImagingFactory,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
-        .ok()?;
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
         let stream = SHCreateMemStream(Some(bytes))?;
         let decoder = factory
             .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
@@ -396,5 +413,48 @@ mod tests {
         // `start` must not block on WinRT, so this returns immediately.
         let media = Media::start();
         assert!(!media.snapshot().has_session());
+    }
+
+    /// Manual diagnostic for the artwork pipeline; run with a live player:
+    /// `cargo test live_smtc_art_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_smtc_art_probe() {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let mut manager = None;
+        let session = current_session(&mut manager).expect("no session");
+        eprintln!(
+            "source: {}",
+            session
+                .SourceAppUserModelId()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        );
+        let props = session
+            .TryGetMediaPropertiesAsync()
+            .and_then(|op| op.join())
+            .expect("media props");
+        eprintln!(
+            "title: {}",
+            props.Title().map(|s| s.to_string()).unwrap_or_default()
+        );
+        let thumb = props.Thumbnail().expect("no thumbnail object");
+        let stream = thumb
+            .OpenReadAsync()
+            .ok()
+            .expect("OpenReadAsync() returned Err")
+            .join()
+            .expect("OpenReadAsync() join failed");
+        eprintln!("size: {:?}", stream.Size().ok());
+        let bytes = read_stream(&stream).expect("read_stream returned None");
+        eprintln!(
+            "bytes: {} head: {:?}",
+            bytes.len(),
+            &bytes[..bytes.len().min(12)]
+        );
+        let rgba = decode_rgba(&bytes).map(|(p, w, h)| (p.len(), w, h));
+        eprintln!("decode_rgba: {rgba:?}");
+        let art = fetch_art(&session).map(|(h, a)| (h.0, a.a));
+        eprintln!("fetch_art: {art:?}");
     }
 }

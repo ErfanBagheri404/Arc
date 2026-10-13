@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use windows::core::{Error, Interface, BOOL, PCWSTR};
 use std::os::windows::ffi::OsStrExt;
+use windows::core::{Error, Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
@@ -22,19 +22,11 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE,
-    D2D1_LAYER_PARAMETERS, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1_RENDER_TARGET_USAGE_NONE,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
 };
-use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICFormatConverter,
-    IWICImagingFactory, IWICPalette, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom,
-    WICDecodeMetadataCacheOnDemand,
-};
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
-use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
 };
@@ -45,17 +37,23 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteTextFormat,
-    DWRITE_FACTORY_TYPE_SHARED, IDWriteFontCollection,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICFormatConverter,
+    IWICImagingFactory, IWICPalette, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom,
+    WICDecodeMetadataCacheOnDemand,
+};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::UI::Shell::SHCreateMemStream;
 
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
@@ -505,9 +503,7 @@ impl Renderer {
         if offset_x != 0.0 {
             // The render target is DPI-scaled, so a translation in logical
             // units lands in device pixels without further conversion.
-            let _ = unsafe {
-                target.SetTransform(&Matrix3x2::translation(offset_x, 0.0))
-            };
+            let _ = unsafe { target.SetTransform(&Matrix3x2::translation(offset_x, 0.0)) };
         }
         unsafe {
             // Transparent clear every frame: the body is drawn at alpha 1 and
@@ -574,16 +570,48 @@ impl Renderer {
                     );
                 }
             }
-            Node::Glyph { rect, color, .. } => {
-                // Real glyph outlines land in Phase 2; a flat fill keeps the slot
-                // visible and correctly sized.
-                self.fill_squircle(target, *rect, CornerRadii::uniform(2.0), *color)
-            }
+            Node::Glyph { rect, name, color } => self.fill_glyph(target, *rect, name, *color),
             Node::Group { children, .. } => {
                 for child in children {
                     self.draw_node(target, child);
                 }
             }
+        }
+    }
+
+    /// Paint one named glyph as a filled path. Only the four transport names
+    /// exist; an unknown name draws nothing (fail-visible would be a blob).
+    fn fill_glyph(&mut self, target: &ID2D1RenderTarget, rect: Rect, name: &str, color: Rgba) {
+        if color.a <= 0.0 || rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let Some(tris) = glyph_tris(name, &rect) else {
+            return;
+        };
+        let Some(brush) = self.brush(target, color) else {
+            return;
+        };
+        let Some(factory) = self.d2d_factory.clone() else {
+            return;
+        };
+        let Ok(path) = (unsafe { factory.CreatePathGeometry() }) else {
+            return;
+        };
+        let Ok(sink) = (unsafe { path.Open() }) else {
+            return;
+        };
+        unsafe {
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            for tri in &tris {
+                sink.BeginFigure(p2(tri[0]), D2D1_FIGURE_BEGIN_FILLED);
+                sink.AddLine(p2(tri[1]));
+                sink.AddLine(p2(tri[2]));
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
+            if sink.Close().is_err() {
+                return;
+            }
+            target.FillGeometry(&path, &brush, None);
         }
     }
 
@@ -707,7 +735,8 @@ impl Renderer {
             dpiX: 96.0,
             dpiY: 96.0,
         };
-        let Ok(bitmap) = (unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) }) else {
+        let Ok(bitmap) = (unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) })
+        else {
             self.fill_squircle(target, rect, radii, Rgba::rgb(0.16, 0.16, 0.18));
             return;
         };
@@ -725,7 +754,9 @@ impl Renderer {
                 sink.SetFillMode(D2D1_FILL_MODE_WINDING);
                 for step in outline_steps(&rect, radii) {
                     match step {
-                        OutlineStep::Begin(p) => sink.BeginFigure(point(p), D2D1_FIGURE_BEGIN_FILLED),
+                        OutlineStep::Begin(p) => {
+                            sink.BeginFigure(point(p), D2D1_FIGURE_BEGIN_FILLED)
+                        }
                         OutlineStep::Line(p) => sink.AddLine(point(p)),
                         OutlineStep::Bezier(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT {
                             point1: point(c1),
@@ -741,7 +772,15 @@ impl Renderer {
 
         let layer: Option<ID2D1Layer> = unsafe { target.CreateLayer(None).ok() };
         let Some(layer) = layer else {
-            unsafe { target.DrawBitmap(&bitmap, Some(&to_rect(rect)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+            unsafe {
+                target.DrawBitmap(
+                    &bitmap,
+                    Some(&to_rect(rect)),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                )
+            };
             return;
         };
         let parameters = D2D1_LAYER_PARAMETERS {
@@ -822,11 +861,29 @@ impl Renderer {
         // build failed the family chain starts at Segoe UI so every run
         // still gets a real format.
         let families: [&str; 5] = if style.mono {
-            ["Cascadia Mono", "Cascadia Code", "Consolas", "Courier New", "Arial"]
+            [
+                "Cascadia Mono",
+                "Cascadia Code",
+                "Consolas",
+                "Courier New",
+                "Arial",
+            ]
         } else if self.font_collection.is_some() {
-            ["Inter", "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Segoe UI"]
+            [
+                "Inter",
+                "Segoe UI Variable Display",
+                "Segoe UI Variable",
+                "Segoe UI",
+                "Segoe UI",
+            ]
         } else {
-            ["Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Segoe UI", "Segoe UI"]
+            [
+                "Segoe UI Variable Display",
+                "Segoe UI Variable",
+                "Segoe UI",
+                "Segoe UI",
+                "Segoe UI",
+            ]
         };
         let collection = if style.mono {
             None
@@ -920,7 +977,9 @@ fn bundled_collection(factory: &IDWriteFactory5) -> Option<IDWriteFontCollection
     // SAFETY: every handle is an owned COM reference kept alive by the
     // returned collection; `wpath` outlives the call.
     unsafe {
-        let file = factory.CreateFontFileReference(PCWSTR(wpath.as_ptr()), None).ok()?;
+        let file = factory
+            .CreateFontFileReference(PCWSTR(wpath.as_ptr()), None)
+            .ok()?;
         let builder = factory.CreateFontSetBuilder().ok()?;
         builder.AddFontFile(&file).ok()?;
         let set = builder.CreateFontSet().ok()?;
@@ -947,6 +1006,85 @@ fn point((x, y): (f32, f32)) -> windows_numerics::Vector2 {
     windows_numerics::Vector2::new(x, y)
 }
 
+fn p2(p: [f32; 2]) -> windows_numerics::Vector2 {
+    point((p[0], p[1]))
+}
+
+/// Transport glyph outlines as triangles inside `rect`. Each glyph is centered
+/// with a slight optical shift right (play/next lean forward, like SF Symbols).
+/// `pause` is a degenerate quad drawn as two skinny triangles.
+fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
+    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
+    let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+    let s = w.min(h) * 0.5; // half-size of the glyph box
+    let tris: Vec<[[f32; 2]; 3]> = match name {
+        "play" => vec![[
+            [cx - s * 0.5 + s * 0.15, cy - s * 0.72],
+            [cx - s * 0.5 + s * 0.15, cy + s * 0.72],
+            [cx + s * 0.72, cy],
+        ]],
+        "pause" => vec![
+            [
+                [cx - s * 0.45, cy - s * 0.72],
+                [cx - s * 0.45, cy + s * 0.72],
+                [cx - s * 0.02, cy + s * 0.72],
+            ],
+            [
+                [cx - s * 0.45, cy - s * 0.72],
+                [cx - s * 0.02, cy + s * 0.72],
+                [cx - s * 0.02, cy - s * 0.72],
+            ],
+            [
+                [cx + s * 0.02, cy - s * 0.72],
+                [cx + s * 0.02, cy + s * 0.72],
+                [cx + s * 0.45, cy + s * 0.72],
+            ],
+            [
+                [cx + s * 0.02, cy - s * 0.72],
+                [cx + s * 0.45, cy + s * 0.72],
+                [cx + s * 0.45, cy - s * 0.72],
+            ],
+        ],
+        "prev" => vec![
+            // bar at left, then left-pointing triangle
+            [
+                [cx - s * 0.62, cy - s * 0.72],
+                [cx - s * 0.62, cy + s * 0.72],
+                [cx - s * 0.36, cy + s * 0.72],
+            ],
+            [
+                [cx - s * 0.62, cy - s * 0.72],
+                [cx - s * 0.36, cy + s * 0.72],
+                [cx - s * 0.36, cy - s * 0.72],
+            ],
+            [
+                [cx + s * 0.62, cy - s * 0.72],
+                [cx - s * 0.36, cy],
+                [cx + s * 0.62, cy + s * 0.72],
+            ],
+        ],
+        "next" => vec![
+            [
+                [cx + s * 0.36, cy - s * 0.72],
+                [cx + s * 0.36, cy + s * 0.72],
+                [cx + s * 0.62, cy + s * 0.72],
+            ],
+            [
+                [cx + s * 0.36, cy - s * 0.72],
+                [cx + s * 0.62, cy + s * 0.72],
+                [cx + s * 0.62, cy - s * 0.72],
+            ],
+            [
+                [cx - s * 0.62, cy - s * 0.72],
+                [cx + s * 0.36, cy],
+                [cx - s * 0.62, cy + s * 0.72],
+            ],
+        ],
+        _ => return None,
+    };
+    Some(tris)
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
         // Release in reverse creation order; each field drops its own COM ref, so
@@ -960,6 +1098,29 @@ impl Drop for Renderer {
 mod tests {
     use super::*;
     use crate::core::scene::{Node, Scene};
+
+    /// Every transport glyph must be a non-empty set of closed triangles that
+    /// stay inside their rect. A vertex outside the rect paints over the
+    /// neighbouring button; an empty set is a button the user can click but
+    /// never see. Unknown names draw nothing.
+    #[test]
+    fn transport_glyphs_fit_their_rect() {
+        let rect = Rect::new(100.0, 50.0, 22.0, 22.0);
+        for name in ["play", "pause", "prev", "next"] {
+            let tris = glyph_tris(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
+            assert!(!tris.is_empty(), "{name} draws nothing");
+            for tri in &tris {
+                for &[x, y] in tri {
+                    assert!(
+                        (rect.x - 0.001..=rect.x + rect.w + 0.001).contains(&x)
+                            && (rect.y - 0.001..=rect.y + rect.h + 0.001).contains(&y),
+                        "{name} vertex ({x},{y}) escapes its rect"
+                    );
+                }
+            }
+        }
+        assert!(glyph_tris("seek", &rect).is_none());
+    }
 
     fn frame() -> Frame {
         Frame {
@@ -979,8 +1140,8 @@ mod tests {
     /// Segoe UI and the app loses its reference look with no other symptom.
     #[test]
     fn bundled_inter_is_visible_to_directwrite() {
-        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-            .expect("dwrite factory");
+        let factory: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.expect("dwrite factory");
         let factory5 = factory.cast::<IDWriteFactory5>().expect("factory5");
         let collection = bundled_collection(&factory5).expect("bundled collection");
 
