@@ -143,8 +143,7 @@ pub fn wifi_ssid() -> Option<String> {
                 }
                 let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
                 let mut size = 0u32;
-                let query = unsafe {
-                    WlanQueryInterface(
+                let query = WlanQueryInterface(
                         handle,
                         &iface.InterfaceGuid,
                         wlan_intf_opcode_current_connection,
@@ -152,20 +151,20 @@ pub fn wifi_ssid() -> Option<String> {
                         &mut size,
                         &mut data,
                         None,
-                    )
-                };
+                    );
                 if query != 0 || data.is_null() {
                     continue;
                 }
-                // SAFETY: the blob for this opcode is a `WLAN_CONNECTION_ATTRIBUTES`.
-                let conn = unsafe { &*(data as *const WLAN_CONNECTION_ATTRIBUTES) };
+                // SAFETY (outer block): the blob for this opcode is a
+                // `WLAN_CONNECTION_ATTRIBUTES`.
+                let conn = &*(data as *const WLAN_CONNECTION_ATTRIBUTES);
                 let raw = &conn.wlanAssociationAttributes.dot11Ssid;
                 let n = (raw.uSSIDLength as usize).min(raw.ucSSID.len());
                 if n > 0 {
                     ssid = Some(ssid_string(&raw.ucSSID[..n]));
                 }
-                // SAFETY: `data` is a service allocation, freed immediately.
-                unsafe { WlanFreeMemory(data as *const _) };
+                // `data` is a service allocation, freed immediately.
+                WlanFreeMemory(data as *const _);
                 if ssid.is_some() {
                     break;
                 }

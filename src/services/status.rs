@@ -17,6 +17,11 @@
 //! outcome for displays without DDC/CI (TVs, some docks) — no HUD, never a
 //! fake 0 %.
 
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+
+/// `DRIVE_REMOVABLE` from the SDK; the windows crate files it under a module
+/// we do not otherwise need, and the value is ABI-stable.
+const DRIVE_REMOVABLE: u32 = 2;
 use windows::Win32::Devices::Display::{
     GetMonitorBrightness, GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR,
 };
@@ -67,6 +72,55 @@ pub fn brightness() -> Option<u8> {
     }
 }
 
+/// The label of the first removable drive that is mounted right now, e.g.
+/// `KINGSTON`. DynamicNotch's ExternalDevices activity; on Windows the
+/// removable class is exactly `DRIVE_REMOVABLE`, so the query is one
+/// `GetLogicalDrives` bitmask plus a `GetDriveTypeW` per set bit.
+///
+/// The *change* is what the HUD reacts to, and the app already holds the
+/// previous answer, so this stays a pure read: no notifications, no window
+/// handle, no watcher thread.
+pub fn removable_drive() -> Option<String> {
+    // SAFETY: bitmask read; no pointers.
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0..26u32 {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let root = [b'A' as u16 + i as u16, b':' as u16, b'\\' as u16, 0];
+        // SAFETY: `root` is a live, NUL-terminated wide string.
+        if unsafe { GetDriveTypeW(windows::core::PCWSTR(root.as_ptr())) } != DRIVE_REMOVABLE {
+            continue;
+        }
+        let mut label = [0u16; 64];
+        let mut serial = 0u32;
+        // SAFETY: out-params are caller-owned buffers of the stated length;
+        // a failure leaves `label` zeroed, which reads as an empty name.
+        let ok = unsafe {
+            GetVolumeInformationW(
+                windows::core::PCWSTR(root.as_ptr()),
+                Some(&mut label),
+                Some(&mut serial),
+                None,
+                None,
+                None,
+            )
+        }
+        .is_ok();
+        if !ok {
+            return Some(format!("{}:", (b'A' + i as u8) as char));
+        }
+        let end = label.iter().position(|c| *c == 0).unwrap_or(label.len());
+        let name = String::from_utf16_lossy(&label[..end]);
+        return Some(if name.trim().is_empty() {
+            format!("{}:", (b'A' + i as u8) as char)
+        } else {
+            name.trim().to_string()
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +130,12 @@ mod tests {
         // Values depend on the machine; the contract is "never panics".
         let _ = focus_on();
         let _ = brightness();
+    }
+
+    #[test]
+    fn removable_drive_probe_never_panics() {
+        // Depends on what is plugged in; the contract is "never panics".
+        let _ = removable_drive();
     }
 
     #[test]

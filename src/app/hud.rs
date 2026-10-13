@@ -42,6 +42,8 @@ pub enum Hud {
     Focus(bool),
     /// Brightness changed: the OSD number, 0..=100.
     Brightness(u8),
+    /// A removable drive appeared (`Some(label)`) or was unplugged (`None`).
+    Drive(Option<String>),
 }
 
 /// Battery/AC state, straight from `GetSystemPowerStatus`.

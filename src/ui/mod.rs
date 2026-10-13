@@ -916,6 +916,14 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
             None,
         ),
         Hud::Brightness(pct) => (PILL_GREEN, format!("{pct} %"), Some(*pct as f32 / 100.0)),
+        Hud::Drive(label) => (
+            PILL_GREEN,
+            match label {
+                Some(l) => format!("\u{25a4} {}", l.chars().take(20).collect::<String>()),
+                None => "drive ejected".to_string(),
+            },
+            None,
+        ),
     };
 
     let mut out = vec![Node::RoundRect {

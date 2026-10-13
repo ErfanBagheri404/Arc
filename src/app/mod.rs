@@ -262,6 +262,8 @@ pub fn run() -> std::process::ExitCode {
     let mut last_net_state: Option<NetState> = None;
     let mut last_focus: Option<bool> = None;
     let mut last_brightness: Option<u8> = None;
+    // drives: outer None = first reading, inner None = nothing plugged in
+    let mut last_drive: Option<Option<String>> = None;
     let mut last_power_state: Option<power::Power> = None;
     // Audio (volume / mic) runs on its own worker thread — the COM pointer and
     // 250 ms cadence live there, the app only reads the snapshot.
@@ -533,6 +535,13 @@ pub fn run() -> std::process::ExitCode {
                     armed = true;
                 }
             }
+            // Removable drives: appear/eject transitions only, same rule.
+            let drive = status::removable_drive();
+            if matches!(last_drive, Some(prev) if prev != drive) {
+                hud.arm(hud::Hud::Drive(drive.clone()), now);
+                armed = true;
+            }
+            last_drive = Some(drive);
             if armed {
                 view.hud = hud.current();
                 redraw = true;
