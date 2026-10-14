@@ -15,8 +15,10 @@ pub const PANEL_W_REF: f32 = 640.0;
 pub const PILL_RADIUS_REF: f32 = 16.0;
 /// Expanded panel corner radius, mirrored from `app::state::PANEL_RADIUS`.
 pub const PANEL_RADIUS_REF: f32 = 36.0;
-/// Width of decorative ear arc beside each top corner.
-pub const EAR_W: f32 = 20.0;
+/// Transparent margin beside the body. 0 because the pill silhouette has no
+/// decorative ears any more (Atoll's DynamicIslandPillShape); the window is
+/// exactly the body, so the hover/hit region matches what is drawn.
+pub const EAR_W: f32 = 0.0;
 
 /// Collapsed pill height, mirrored from `app::state::PILL_H`.
 pub const PILL_H_REF: f32 = 32.0;
