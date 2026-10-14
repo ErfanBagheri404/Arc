@@ -459,14 +459,16 @@ pub fn build(state: &ViewState) -> Frame {
 
     let mut scene = Scene::new();
 
-    // 1. The body. One shape: square top corners (the island hangs flush from
-    //    the screen edge — rounding them notches desktop through against the
-    //    edge), bottom pair carrying the iOS continuous-corner radius.
+    // 1. The body. One shape, DynamicNotch's NotchStyle: the silhouette starts
+    //    at the window's top corner, sweeps inward along a concave wing curve
+    //    (negative radius), drops down the side, rounds along the bottom with
+    //    the iOS continuous corner, and mirrors on the right. The wings and the
+    //    body are one figure, so the ears stay in sync at every morph state.
     scene.push(Node::RoundRect {
         rect: frame,
         radii: CornerRadii {
-            top_left: 0.0,
-            top_right: 0.0,
+            top_left: -layout::EAR_W,
+            top_right: -layout::EAR_W,
             bottom_left: radius,
             bottom_right: radius,
         }
@@ -1644,13 +1646,14 @@ mod tests {
 
     #[test]
     fn body_corners_are_all_ios_rounded() {
-        // Square top corners (the island hangs flush from the screen edge); the
-        // bottom ones carry the iOS semicircular/cubic corner.
+        // Top corners are the constant concave wings (-EAR_W); bottoms carry
+        // the iOS continuous radius.
         let Node::RoundRect { radii, .. } = &collapsed().scene.nodes[0] else {
             panic!()
         };
-        assert_eq!(radii.top_left, 0.0);
-        assert_eq!(radii.top_right, 0.0);
+        // The clamp caps the wing at half the pill height (16 at h=32).
+        assert_eq!(radii.top_left, -(layout::EAR_W.min(PILL_H_REF / 2.0)));
+        assert_eq!(radii.top_right, -(layout::EAR_W.min(PILL_H_REF / 2.0)));
         assert_eq!(radii.bottom_left, PILL_RADIUS_REF);
         assert_eq!(radii.bottom_right, PILL_RADIUS_REF);
         assert_eq!(PILL_RADIUS_REF, 16.0);
@@ -1666,9 +1669,10 @@ mod tests {
                 panic!()
             };
             let h = height_at(open);
+            let notch = layout::EAR_W.min(h / 2.0);
+            assert_eq!(radii.top_left, -notch, "wing notch at {open}");
+            assert_eq!(radii.top_right, -notch, "wing notch at {open}");
             let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
-            assert_eq!(radii.top_left, 0.0, "top stays square at {open}");
-            assert_eq!(radii.top_right, 0.0, "top stays square at {open}");
             assert!(
                 (radii.bottom_left - want).abs() < 1e-3,
                 "bottom_left at {open}"
@@ -1952,8 +1956,8 @@ mod tests {
 
     #[test]
     fn radius_lerps_16_to_36_across_the_morph() {
-        // Top corners stay square; the bottom pair tracks openness 16 -> 36
-        // monotonically.
+        // Top corners are the constant wing notch; bottom corners track
+        // openness 16 -> 36 monotonically.
         let mut prev = -1.0;
         for i in 0..=100 {
             let open = i as f32 / 100.0;
@@ -1962,8 +1966,8 @@ mod tests {
                 panic!()
             };
             let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
-            assert_eq!(radii.top_left, 0.0, "top stays square at {open}");
-            assert_eq!(radii.top_right, 0.0, "top stays square at {open}");
+            assert_eq!(radii.top_left, -layout::EAR_W, "wing notch at {open}");
+            assert_eq!(radii.top_right, -layout::EAR_W, "wing notch at {open}");
             assert!(
                 (radii.bottom_left - want).abs() < 1e-3,
                 "at {open}: {:?}",

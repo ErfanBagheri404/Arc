@@ -998,11 +998,17 @@ impl Renderer {
             // Word-ellipsis trimming, once per cached format: DrawText with a
             // fixed rect would wrap or bleed for any caller that hands us more
             // text than the box holds. The sign belongs to the factory.
+            // CHARACTER, not WORD: word trimming only cuts at word boundaries, so
+            // a single long token with no spaces (`GhatleAmd[PianoVersion]`, a
+            // hash, a path) finds no boundary inside the box, is left untrimmed,
+            // and runs past the panel edge. Character granularity always fits the
+            // box, which is the invariant the UI relies on (`fit` clamps the rect,
+            // so an untrimmed run escapes the visible body).
             if let Some(dwrite) = self.dwrite.as_ref() {
                 if let Ok(sign) = dwrite.CreateEllipsisTrimmingSign(&format) {
                     let _ = format.SetTrimming(
                         &windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING {
-                            granularity: windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING_GRANULARITY_WORD,
+                            granularity: windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING_GRANULARITY_CHARACTER,
                             delimiter: 0,
                             delimiterCount: 0,
                         },

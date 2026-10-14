@@ -15,10 +15,8 @@ pub const PANEL_W_REF: f32 = 640.0;
 pub const PILL_RADIUS_REF: f32 = 16.0;
 /// Expanded panel corner radius, mirrored from `app::state::PANEL_RADIUS`.
 pub const PANEL_RADIUS_REF: f32 = 36.0;
-/// Transparent margin beside the body. 0 because the pill silhouette has no
-/// decorative ears any more (Atoll's DynamicIslandPillShape); the window is
-/// exactly the body, so the hover/hit region matches what is drawn.
-pub const EAR_W: f32 = 0.0;
+/// Width of decorative ear arc beside each top corner.
+pub const EAR_W: f32 = 20.0;
 
 /// Collapsed pill height, mirrored from `app::state::PILL_H`.
 pub const PILL_H_REF: f32 = 32.0;
@@ -122,6 +120,7 @@ pub fn fade(base: Rgba, opacity: f32) -> Rgba {
 /// When the desired row does not fit, the gaps collapse first and then the item
 /// widths are scaled down proportionally — items are never allowed to overflow
 /// the container, which is how the tab strip survives a half-open island.
+pub const MIN_ITEM_GAP: f32 = 2.0;
 #[must_use]
 pub fn row_items(widths: &[f32], gap: f32, available: f32) -> Vec<(f32, f32)> {
     let n = widths.len();
@@ -133,8 +132,20 @@ pub fn row_items(widths: &[f32], gap: f32, available: f32) -> Vec<(f32, f32)> {
     let (eff_gap, eff_widths): (f32, Vec<f32>) = if total + gap * last <= available {
         (gap.max(0.0), widths.to_vec())
     } else if total > 0.0 {
-        let scale = available / total;
-        (0.0, widths.iter().map(|w| (w * scale).max(0.0)).collect())
+        // Over budget: the GAP is the slack, not the labels. Scaling widths by
+        // `available / total` — a total that never counted the gaps — made every
+        // box LARGER while zeroing the gap, so ten tabs each lost their label to
+        // an ellipsis (`Me…`, `Calen…`) instead of tightening. Shave the gap to
+        // its readable floor first and shrink the boxes only if that wasn't
+        // enough.
+        let floor = gap.min(MIN_ITEM_GAP);
+        let room = (available - floor * last).max(0.0);
+        if total <= room {
+            (floor, widths.to_vec())
+        } else {
+            let scale = room / total;
+            (floor, widths.iter().map(|w| (w * scale).max(0.0)).collect())
+        }
     } else {
         (0.0, vec![0.0; n])
     };
@@ -152,6 +163,24 @@ pub fn row_items(widths: &[f32], gap: f32, available: f32) -> Vec<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_items_shrink_gaps_before_labels() {
+        // Ten tabs at natural widths: over budget, the gap must collapse
+        // toward MIN_ITEM_GAP while the widths keep their proportions — never
+        // grow while the gap goes to zero (that truncation produced `Me…`).
+        let widths = [60.0, 60.0, 60.0, 60.0];
+        let items = row_items(&widths, 8.0, 100.0);
+        let total: f32 = items.iter().map(|(_, w)| w).sum::<f32>() + MIN_ITEM_GAP * 3.0;
+        assert!(total <= 100.0 + 1e-3, "row must fit: {total}");
+        for (_, w) in &items {
+            assert!(*w < 60.0, "boxes must shrink, not grow: {items:?}");
+        }
+        let gaps: Vec<f32> = items.windows(2).map(|p| p[1].0 - (p[0].0 + p[0].1)).collect();
+        for g in &gaps {
+            assert!((g - MIN_ITEM_GAP).abs() < 1e-3, "gap floor: {gaps:?}");
+        }
+    }
 
     #[test]
     fn openness_endpoints_and_clamping() {
