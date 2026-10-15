@@ -75,6 +75,17 @@ pub const TAB_H: f32 = 20.0;
 /// label. Nine tabs fit comfortably at the 8 px gap; the padding stays so
 /// labels still read as chips instead of crammed text.
 pub const TAB_PAD: f32 = 7.0;
+/// Extra room inside every tab box for the renderer's own measurement to
+/// disagree with [`crate::ui::text::measure`].
+///
+/// The table is an approximation and DirectWrite is authoritative, so a box
+/// sized to *exactly* the estimate truncates the moment the real glyphs run
+/// even slightly wider — the label loses its tail to an ellipsis
+/// (`Me…`, `Tim…`) while the row still has 78 px of slack to give. The slack
+/// has to live in the box, not in `measure`: every caller of `measure` also
+/// uses it to centre text inside a wider rect, and widening the shared table
+/// would over-size clocks and titles that already fit.
+pub const TAB_SLACK: f32 = 3.0;
 /// Corner radius of the hovered/active tab's background pill.
 pub const TAB_RADIUS: f32 = 8.0;
 /// Height of one content row.
@@ -450,7 +461,7 @@ impl ViewState {
 fn tab_boxes(fw: f32) -> Vec<(f32, f32)> {
     let natural: Vec<f32> = TABS
         .iter()
-        .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0)
+        .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0 + TAB_SLACK)
         .collect();
     layout::row_items(&natural, TAB_GAP, fw - PANEL_PAD * 2.0)
         .into_iter()
@@ -1740,7 +1751,7 @@ mod tests {
         let rects = glyph_rects(&panel());
         let natural: Vec<f32> = TABS
             .iter()
-            .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0)
+            .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0 + TAB_SLACK)
             .collect();
         let avail = PANEL_W_REF - PANEL_PAD * 2.0;
         let boxes = layout::row_items(&natural, TAB_GAP, avail);
@@ -1762,7 +1773,53 @@ mod tests {
                 find_text(&f, label).unwrap_or_else(|| panic!("missing tab label {label}"));
             let want = measure(label, &TAB_LABEL);
             assert!(want > 0.0, "{label} measured zero width");
-            assert!((rect.w - want).abs() < 1e-4, "{label}: {rect:?}");
+            // Measured, plus the slack that keeps DirectWrite's slightly wider
+            // real advances from being trimmed away.
+            assert!((rect.w - want - TAB_SLACK).abs() < 1e-4, "{label}: {rect:?}");
+        }
+    }
+
+    /// The whole reason `TAB_SLACK` exists: every tab label must survive the
+    /// renderer's own measurement inside its box. `measure` is a table and
+    /// DirectWrite is authoritative, so a box sized to the bare estimate is one
+    /// sub-pixel disagreement away from an ellipsis (`Me…`, `Tim…`) — which is
+    /// exactly what the open panel showed while the row still had 78 px spare.
+    #[test]
+    fn every_tab_label_fits_its_box_with_slack_to_spare() {
+        for (label, (_, w)) in TABS.iter().zip(&tab_boxes(PANEL_W_REF)) {
+            assert!(
+                *w - TAB_PAD * 2.0 >= measure(label, &TAB_LABEL) + TAB_SLACK - 1e-4,
+                "{label}: box {w} leaves no room for the real run"
+            );
+        }
+    }
+
+    /// Full-tab text containment: every tab draws its own content, and every
+    /// text rect it emits must stay inside the panel frame. This is the check
+    /// that was missing when "some texts were not being shortened at all, they
+    /// went outside the box": only the default tab's panel was bounds-checked,
+    /// so an escaping rect on any other tab shipped silently. Also note that
+    /// `assert_in_bounds` here is over the *frame*, not just the body.
+    #[test]
+    fn every_tab_keeps_every_text_inside_its_frame() {
+        for tab in 0..TABS.len() {
+            let f = build(&view(tab, None));
+            assert_in_bounds(&f, PANEL_W_REF, PANEL_H_REF);
+            for (t, r, _) in texts(&f) {
+                // A zero-sized text rect paints nothing and is how a "missing"
+                                // label sneaks through; reject it.
+                assert!(r.w > 0.0 && r.h > 0.0, "tab {tab}: {t:?} has empty rect");
+                assert!(
+                    r.x >= PANEL_PAD - layout::BOUNDS_EPSILON
+                        && r.max_x() <= PANEL_W_REF - PANEL_PAD + layout::BOUNDS_EPSILON,
+                    "tab {tab}: {t:?} escapes horizontally: {r:?}"
+                );
+                assert!(
+                    r.y >= 0.0 - layout::BOUNDS_EPSILON
+                        && r.max_y() <= PANEL_H_REF + layout::BOUNDS_EPSILON,
+                    "tab {tab}: {t:?} escapes vertically: {r:?}"
+                );
+            }
         }
     }
 

@@ -78,7 +78,9 @@ pub fn content(
     pet_count: usize,
 ) -> Vec<Node> {
     let mut out = Vec::new();
-    out.extend(row(fw, fh, toggle_rect(fw, top), "Pet when idle"));
+    // The toggle switch owns the row's right edge: the label must end left of
+    // the track (36 wide, 10 inset, 8 gap) instead of running underneath it.
+    out.extend(row(fw, fh, toggle_rect(fw, top), "Pet when idle", 44.0));
     out.push(toggle(fw, fh, toggle_rect(fw, top), pet_on));
     if pet_on {
         let label = match pet_name {
@@ -86,7 +88,17 @@ pub fn content(
             None if pet_count == 0 => "Pet · none installed".to_string(),
             None => "Pet".to_string(),
         };
-        out.extend(row(fw, fh, picker_rect(fw, top), &label));
+        // Same for the picker's "‹ ›" hint when it shows.
+        let right = if pet_count > 1 {
+            let style = TextStyle {
+                size: 13.0,
+                ..Default::default()
+            };
+            measure("‹ ›", &style) + 20.0
+        } else {
+            0.0
+        };
+        out.extend(row(fw, fh, picker_rect(fw, top), &label, right));
         if pet_count > 1 {
             out.push(chevrons(fw, fh, picker_rect(fw, top)));
         }
@@ -95,7 +107,11 @@ pub fn content(
 }
 
 /// A settings row: a full-width track plus its left-aligned label.
-fn row(fw: f32, fh: f32, r: Rect, label: &str) -> Vec<Node> {
+///
+/// `right` is extra room reserved past the base 10 px pad for a control on
+/// the row's right edge (toggle switch, picker chevrons), so the label's box
+/// ends left of the control instead of running underneath it.
+fn row(fw: f32, fh: f32, r: Rect, label: &str, right: f32) -> Vec<Node> {
     let style = TextStyle {
         size: 12.0,
         ..Default::default()
@@ -111,7 +127,12 @@ fn row(fw: f32, fh: f32, r: Rect, label: &str) -> Vec<Node> {
             rect: put(
                 fw,
                 fh,
-                Rect::new(r.x + 10.0, r.y + (r.h - h) * 0.5, (r.w - 20.0).max(0.0), h),
+                Rect::new(
+                    r.x + 10.0,
+                    r.y + (r.h - h) * 0.5,
+                    (r.w - 20.0 - right).max(0.0),
+                    h,
+                ),
             ),
             text: label.to_string(),
             style,
@@ -268,5 +289,57 @@ mod tests {
         assert!(!nodes
             .iter()
             .any(|n| matches!(n, Node::Text { text, .. } if text == "‹ ›")));
+    }
+
+    /// A row's label box must stop left of whatever control shares the row's
+    /// right edge. The label box is the whole `r.w - 20` strip, so a label that
+    /// fills it runs underneath the switch and the "‹ ›" hint — the two
+    /// controls the user cannot read past.
+    #[test]
+    fn row_labels_never_run_under_their_right_edge_control() {
+        for pet_count in [1usize, 2, 3] {
+            let nodes = content(640.0, 400.0, 60.0, true, Some("Nukey"), pet_count);
+            let label_rects: Vec<(String, Rect)> = nodes
+                .iter()
+                .filter_map(|n| match n {
+                    Node::Text { text, rect, .. } => Some((text.clone(), *rect)),
+                    _ => None,
+                })
+                .collect();
+
+            let switch_track = Rect::new(
+                toggle_rect(640.0, 60.0).max_x() - 36.0 - 10.0,
+                0.0,
+                36.0,
+                ROW_H,
+            );
+            for (text, r) in &label_rects {
+                if text == "Pet when idle" {
+                    assert!(
+                        r.max_x() <= switch_track.x + 0.01,
+                        "{text:?} reaches {r:?} into the switch at x={}",
+                        switch_track.x
+                    );
+                }
+            }
+
+            if pet_count > 1 {
+                let hint = label_rects
+                    .iter()
+                    .find(|(t, _)| t == "‹ ›")
+                    .expect("chevrons present");
+                let label = label_rects
+                    .iter()
+                    .find(|(t, _)| t == "Pet · Nukey")
+                    .expect("picker label present");
+                assert!(
+                    label.1.max_x() <= hint.1.x + 0.01,
+                    "label {:?} reaches {:?} into the chevrons {:?}",
+                    label.1,
+                    label.1.max_x(),
+                    hint.1
+                );
+            }
+        }
     }
 }
