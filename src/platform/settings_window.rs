@@ -20,15 +20,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{HBRUSH, UpdateWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowLongPtrW, IsWindowVisible,
-    PeekMessageW, RegisterClassExW, SetWindowLongPtrW, ShowWindow, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, GWLP_USERDATA, MSG, PM_REMOVE, SW_HIDE, SW_SHOW, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_SIZE, WNDCLASSEXW, WS_CAPTION,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetWindowLongPtrW,
+    IsWindowVisible, PeekMessageW, RegisterClassExW, SetWindowLongPtrW, ShowWindow, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, MSG, PM_REMOVE, SW_HIDE, SW_SHOW, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_SIZE, WNDCLASSEXW, WS_CAPTION,
     WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE,
 };
 
@@ -48,6 +50,42 @@ fn client_px(scale: f32) -> (i32, i32) {
     (
         (LOGICAL_W * scale).round().max(1.0) as i32,
         (LOGICAL_H * scale).round().max(1.0) as i32,
+    )
+}
+
+/// Outer window size, in physical px, that leaves exactly [`client_px`] of
+/// client area.
+///
+/// `CreateWindowExW` is handed the *whole* window size, so passing the client
+/// size straight through made `WS_CAPTION` and the border eat into the content:
+/// the layout was 460x150 logical while the client area was ~40 px shorter, and
+/// the bottom row was clipped off the visible sheet.
+fn window_px(scale: f32) -> (i32, i32) {
+    let (cw, ch) = client_px(scale);
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: cw,
+        bottom: ch,
+    };
+    let dpi = (scale * 96.0).round().max(96.0) as u32;
+    // SAFETY: a pure measurement call over a stack RECT — no window involved,
+    // and the result is only read back below.
+    let measured = unsafe {
+        AdjustWindowRectExForDpi(
+            &mut r,
+            WS_CAPTION | WS_SYSMENU,
+            false,
+            WS_EX_TOOLWINDOW,
+            dpi,
+        )
+    };
+    if measured.is_err() {
+        return (cw, ch);
+    }
+    (
+        (r.right - r.left).max(1),
+        (r.bottom - r.top).max(1),
     )
 }
 
@@ -215,7 +253,11 @@ impl SettingsWindow {
         let instance = HINSTANCE::from(module);
         let class = wide(CLASS_NAME);
         let title = wide("Arc Settings");
-        let (w, h) = client_px(1.0);
+        // CreateWindowExW takes the OUTER size, so the caption and border are
+        // added on top of the client area we want.
+        let dpi = unsafe { GetDpiForSystem() };
+        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+        let (w, h) = window_px(scale);
 
         // SAFETY: every argument is owned or borrowed for the call's duration.
         let created = unsafe {
@@ -281,13 +323,25 @@ impl SettingsWindow {
     }
 
     /// Re-read the client size and DPI from the live window.
+    ///
+    /// The size is measured off the window, never assumed: `CreateWindowExW`
+    /// applies the system DPI before the window lands on its monitor, so the
+    /// requested pixel size and the client area that actually exists can differ.
+    /// Trusting the request drew the sheet into a client area it did not have,
+    /// which is how the bottom row ended up clipped.
     fn refresh_metrics(&mut self) {
-        // SAFETY: read-only query on our own HWND.
+        // SAFETY: read-only queries on our own HWND.
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
         let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
         self.state.scale = scale;
-        let (w, h) = client_px(scale);
-        self.state.physical = (w as u32, h as u32);
+        let mut r = RECT::default();
+        if unsafe { GetClientRect(self.hwnd, &mut r) }.is_ok() {
+            let (w, h) = ((r.right - r.left).max(1), (r.bottom - r.top).max(1));
+            self.state.physical = (w as u32, h as u32);
+        } else {
+            let (w, h) = client_px(scale);
+            self.state.physical = (w.max(1) as u32, h.max(1) as u32);
+        }
     }
 
     /// DPI scale of the monitor the window lives on.
@@ -375,6 +429,53 @@ mod tests {
         assert_eq!(client_px(1.0), (460, 150));
         // 125 %, the user's display: the client area must grow, not the padding.
         assert_eq!(client_px(1.25), (575, 188));
+    }
+
+    /// `CreateWindowExW` is handed the OUTER size, so the client size must never
+    /// be passed as it. When it was, `WS_CAPTION` ate the difference and the
+    /// bottom settings row was clipped off the visible sheet at 125 %.
+    #[test]
+    fn the_window_is_bigger_than_its_client_by_the_caption() {
+        for scale in [1.0, 1.25, 1.5] {
+            let (cw, ch) = client_px(scale);
+            let (ww, wh) = window_px(scale);
+            assert!(ww > cw, "scale {scale}: width {ww} must exceed client {cw}");
+            assert!(wh > ch, "scale {scale}: height {wh} must exceed client {ch}");
+            // A caption is never thinner than ~20 px at 96 dpi, and it grows
+            // with the scale — a one-pixel difference means the adjust was
+            // applied at the wrong DPI or skipped.
+            assert!(
+                wh - ch >= 20,
+                "scale {scale}: caption only {} px of headroom",
+                wh - ch
+            );
+        }
+    }
+
+    /// The invariant the renderer depends on: `logical_size` divides the
+    /// MEASURED client by the DPI, and the UI must never end up with less room
+    /// than it laid out for. `client_px` rounds to whole physical px, so the
+    /// round-trip can give back at most half a physical pixel of slack — never a
+    /// shortfall, which is what clips the last row.
+    #[test]
+    fn the_measured_client_never_comes_back_smaller_than_the_contract() {
+        for s in [1.0, 1.25, 1.5] {
+            let (cw, ch) = client_px(s);
+            let slack = 0.5 / s;
+            let (lw, lh) = (cw as f32 / s, ch as f32 / s);
+            assert!(
+                lw >= LOGICAL_W - 1e-3 && lw <= LOGICAL_W + slack + 1e-3,
+                "scale {s}: logical width {lw} outside [{}, {}]",
+                LOGICAL_W,
+                LOGICAL_W + slack
+            );
+            assert!(
+                lh >= LOGICAL_H - 1e-3 && lh <= LOGICAL_H + slack + 1e-3,
+                "scale {s}: logical height {lh} outside [{}, {}]",
+                LOGICAL_H,
+                LOGICAL_H + slack
+            );
+        }
     }
 
     #[test]
