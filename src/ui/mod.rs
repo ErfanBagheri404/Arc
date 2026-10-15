@@ -106,6 +106,10 @@ pub const PILL_PROGRESS_BOTTOM_PAD: f32 = 6.0;
 /// the notch's centerpiece, so it may fill the pill more than the resting
 /// glyph's 14 px square.
 pub const PILL_PET_PAD: f32 = 4.0;
+/// Spectrum bar width, and the gap between bars. Module-level (not local to
+/// `viz_bars`) because the pill's flank layout reserves the same slot width.
+const VIZ_BAR_W: f32 = 2.0;
+const VIZ_GAP: f32 = 2.0;
 /// Placeholder clock. A real tab replaces this with elapsed/remaining time.
 pub const FOOTER_CLOCK: &str = "00:00";
 
@@ -583,6 +587,18 @@ pub fn build(state: &ViewState) -> Frame {
         let style = TextStyle::numeric(11.0);
         let th = line_height(&style);
         let h = (fh - 10.0).max(4.0);
+        // The centred mark owns a slot the rows may not cross: a standing label
+        // flows right out of x = 10 and would otherwise be drawn through the
+        // mascot. Widths mirror section 2 — the pet is the pill-height cell,
+        // the spectrum and the resting glyph are both `VIZ_BAR_W*4 + VIZ_GAP*3`.
+        let slot_w = match (&state.pet, state.media.playing) {
+            (Some(p), false) => {
+                let (_, _, sw, sh) = crate::services::pet::frame_rect(p.frame);
+                (layout::PILL_H_REF - PILL_PET_PAD * 2.0) * (sw / sh)
+            }
+            _ => VIZ_BAR_W * 4.0 + VIZ_GAP * 3.0,
+        };
+        let slot_left = ((fw - slot_w) / 2.0 - 8.0).max(0.0);
         let mut x = 10.0f32;
         let mut rows: Vec<String> = Vec::new();
         // Now Playing leads the pill (DynamicNotch/Atoll): the track the user
@@ -604,6 +620,15 @@ pub fn build(state: &ViewState) -> Frame {
         for text in rows {
             let tw = measure(&text, &style);
             let w = (tw + 14.0).min(fw * 0.5);
+            // A row may fill the flank but never enter the slot: the track is
+            // clamped to what's left and the renderer ellipsizes the label to
+            // its own rect, so a long title shortens instead of running under
+            // the mark. A flank too narrow for even a stub drops the rest.
+            let room = slot_left - x - 6.0;
+            if room < 24.0 {
+                break;
+            }
+            let w = w.min(room);
             let track = Rect::new(x, (fh - h) / 2.0, w, h);
             scene.push(Node::RoundRect {
                 rect: put(fw, fh, track),
@@ -611,7 +636,14 @@ pub fn build(state: &ViewState) -> Frame {
                 fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), glyph_opacity),
             });
             scene.push(Node::Text {
-                rect: put(fw, fh, Rect::new(track.x + 7.0, (fh - th) / 2.0, tw, th)),
+                // The text rect is the TRACK's width, not the measured one:
+                // the renderer ellipsizes to its own rect, so a clamped track
+                // clips its label too instead of spilling into the slot.
+                rect: put(
+                    fw,
+                    fh,
+                    Rect::new(track.x + 7.0, (fh - th) / 2.0, (track.w - 14.0).max(0.0), th),
+                ),
                 text,
                 style: TextStyle {
                     color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.92), glyph_opacity),
@@ -1120,11 +1152,9 @@ impl Viz {
 /// Atoll's spectrum: four 2 px bars, gap 2 px, centred in the pill glyph slot,
 /// heights from the visualizer springs. Drawn where the resting glyph would be.
 fn viz_bars(fw: f32, fh: f32, state: &ViewState, alpha: f32) -> Vec<Node> {
-    const BAR_W: f32 = 2.0;
-    const GAP: f32 = 2.0;
     const MAX_H: f32 = 14.0;
     let heights = state.viz.heights();
-    let total = BAR_W * 4.0 + GAP * 3.0;
+    let total = VIZ_BAR_W * 4.0 + VIZ_GAP * 3.0;
     let x0 = (fw - total) / 2.0;
     let cy = fh / 2.0;
     heights
@@ -1136,9 +1166,14 @@ fn viz_bars(fw: f32, fh: f32, state: &ViewState, alpha: f32) -> Vec<Node> {
                 rect: put(
                     fw,
                     fh,
-                    Rect::new(x0 + i as f32 * (BAR_W + GAP), cy - h / 2.0, BAR_W, h),
+                    Rect::new(
+                        x0 + i as f32 * (VIZ_BAR_W + VIZ_GAP),
+                        cy - h / 2.0,
+                        VIZ_BAR_W,
+                        h,
+                    ),
                 ),
-                radii: CornerRadii::uniform(BAR_W / 2.0),
+                radii: CornerRadii::uniform(VIZ_BAR_W / 2.0),
                 fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.95), alpha),
             }
         })
@@ -2168,6 +2203,39 @@ mod tests {
             all_nodes(&playing).iter().filter(|n| matches!(n, Node::Sprite { .. })).count(),
             0
         );
+    }
+
+    /// A standing row must never be drawn through the centred mark. The pet
+    /// sprite sat on top of the "Downloads" track because rows flowed
+    /// straight out of x = 10 with nothing reserving the centre.
+    #[test]
+    fn standing_pill_rows_never_cross_the_centre_mark() {
+        use crate::core::scene::ImageHandle;
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        v.media.playing = false;
+        v.downloads.delta = 12;
+        v.pet = Some(crate::services::pet::PetFrame { handle: ImageHandle(7), frame: 0 });
+        let f = build(&v);
+        // The sprite's own left edge is the reserved slot's inner bound.
+        let (_, _, sw, sh) = crate::services::pet::frame_rect(0);
+        let slot_w = (layout::PILL_H_REF - PILL_PET_PAD * 2.0) * (sw / sh);
+        let slot_left = (PILL_W_REF - slot_w) / 2.0 - 8.0;
+        let mut checked = 0;
+        for t in texts(&f) {
+            let r = t.1;
+            if r.max_x() > slot_left - 8.0 {
+                continue; // the mark itself / panel content, not a flank row
+            }
+            assert!(
+                r.max_x() <= slot_left,
+                "{:?} ends at {:.2}, past the centre slot's left edge {:.2}",
+                t.0,
+                r.max_x(),
+                slot_left
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "the Downloads row should still render in the free flank");
     }
 
     /// Counts round-rects exactly `w` wide — the bars' signature.
