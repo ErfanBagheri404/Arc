@@ -157,14 +157,6 @@ impl IslandState {
         self.retarget();
     }
 
-    /// Open the panel (from anywhere, including `Hidden`): the tray's
-    /// "Settings…" path to a state the user can always see. Overrides a user
-    /// hide — the tray menu is the user, asking to be seen.
-    pub fn expand(&mut self) {
-        self.mode = WindowMode::Expanded;
-        self.retarget();
-    }
-
     /// Point the springs at the current mode's geometry. Springs are retargeted,
     /// never snapped, so every mode change is a morph.
     fn retarget(&mut self) {

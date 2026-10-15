@@ -9,6 +9,7 @@
 
 pub mod dpi;
 pub mod render;
+pub mod settings_window;
 pub mod tray;
 pub mod window;
 

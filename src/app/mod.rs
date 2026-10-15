@@ -12,6 +12,7 @@ pub use state::IslandState;
 
 use std::time::{Duration, Instant};
 
+use crate::platform::settings_window::{self, SettingsEvent, SettingsWindow};
 use crate::platform::{Event, Overlay, Renderer};
 use crate::services::audio::{self, Audio};
 use crate::services::calendars::Calendar;
@@ -35,7 +36,32 @@ use timer::{Timer, PRESETS};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-/// The wall clock for a countdown, in the app thread.
+/// Apply a settings-row click: row 0 toggles the idle pet, row 1 cycles the
+/// installed pets. Persisted immediately — settings are read at boot, so a
+/// change that was not written would not survive a restart.
+fn apply_settings_row(
+    hit: usize,
+    pet: &mut pet::PetState,
+    pet_on: &mut bool,
+    pet_slugs: &[String],
+) {
+    let mut t = settings::load();
+    if hit == 0 {
+        *pet_on = !*pet_on;
+        settings::set_bool(&mut t, "pet_enabled", *pet_on);
+    } else if !pet_slugs.is_empty() {
+        let at = pet.slug().and_then(|s| pet_slugs.iter().position(|k| k == s));
+        let next = match at {
+            Some(i) => pet_slugs[(i + 1) % pet_slugs.len()].clone(),
+            None => pet_slugs[0].clone(),
+        };
+        pet.reload(&next);
+        settings::set_string(&mut t, "pet_slug", &next);
+    }
+    settings::save(&t);
+}
+
+/// The wall-clock runner entry point.
 struct Countdown {
     /// Snapshot handed to the UI each frame.
     view: Timer,
@@ -300,6 +326,8 @@ pub fn run() -> std::process::ExitCode {
     // The tab selection and hover persist across frames; everything else the UI
     // needs is derived from the size springs.
     let mut view = ui::ViewState::default();
+    let mut settings_win: Option<SettingsWindow> = None;
+    let mut settings_dirty = false;
     // The idle-notch pet: settings decide whether it shows and which petdex
     // install it uses. Only the selected sheet is read and interned; the
     // Settings picker needs the install count and the current name, nothing more.
@@ -443,25 +471,7 @@ pub fn run() -> std::process::ExitCode {
                         }
                         redraw = true;
                     } else if let Some(hit) = view.settings_hit(lx, ly) {
-                        // 0 toggles the pet; 1 cycles the installed pets. Both
-                        // persist immediately — settings are read at boot, so a
-                        // change that was not written would not survive a restart.
-                        let mut t = settings::load();
-                        if hit == 0 {
-                            pet_on = !pet_on;
-                            settings::set_bool(&mut t, "pet_enabled", pet_on);
-                        } else if !pet_slugs.is_empty() {
-                            let at = pet
-                                .slug()
-                                .and_then(|s| pet_slugs.iter().position(|k| k == s));
-                            let next = match at {
-                                Some(i) => pet_slugs[(i + 1) % pet_slugs.len()].clone(),
-                                None => pet_slugs[0].clone(),
-                            };
-                            pet.reload(&next);
-                            settings::set_string(&mut t, "pet_slug", &next);
-                        }
-                        settings::save(&t);
+                        apply_settings_row(hit, &mut pet, &mut pet_on, &pet_slugs);
                         view.pet_on = pet_on;
                         view.pet_name = pet.name().map(str::to_string);
                         redraw = true;
@@ -513,13 +523,11 @@ pub fn run() -> std::process::ExitCode {
                     redraw = true;
                 }
                 Event::Quit => return std::process::ExitCode::SUCCESS,
-                // Tray right-click → "Settings": force the panel open and land
-                // on the Settings tab. Not a toggle — the menu already made the
-                // intent unambiguous.
+                // Tray right-click → "Settings…": the standalone window answers,
+                // not the notch. This arm only nudges the renderer; the real
+                // toggle lives next to the settings window's pump further down.
                 Event::OpenSettings => {
-                    state.expand();
-                    view.select_tab(ui::SETTINGS_TAB);
-                    redraw = true;
+                    crate::platform::settings_window::request_open();
                 }
             }
         }
@@ -720,6 +728,46 @@ pub fn run() -> std::process::ExitCode {
             overlay.hide();
         } else {
             overlay.show();
+        }
+
+        // The tray's "Settings…" lands here: the callback only raises a flag, so
+        // the window is created on the app thread. Kept alive for the process —
+        // closing it hides it, and reopening is instant.
+        if settings_window::open_requested() {
+            settings_win = match settings_win.take() {
+                Some(mut existing) => {
+                    existing.show();
+                    Some(existing)
+                }
+                None => SettingsWindow::open(),
+            };
+            settings_dirty = true;
+        }
+        if let Some(win) = settings_win.as_mut() {
+            win.pump();
+            for ev in win.take_events() {
+                if let SettingsEvent::Click { x, y } = ev {
+                    // Client-space physical px → logical px.
+                    let scale = win.scale().max(0.01);
+                    let (fw, _fh) = win.logical_size();
+                    if let Some(row) =
+                        ui::settings::window_row_hit(fw, x as f32 / scale, y as f32 / scale)
+                    {
+                        apply_settings_row(row, &mut pet, &mut pet_on, &pet_slugs);
+                        view.pet_on = pet_on;
+                        view.pet_name = pet.name().map(str::to_string);
+                    }
+                    settings_dirty = true;
+                }
+            }
+            if settings_dirty && win.visible() {
+                settings_dirty = false;
+                let (fw, fh) = win.logical_size();
+                let name = view.pet_name.clone();
+                let frame =
+                    ui::settings::window_frame(fw, fh, pet_on, name.as_deref(), pet_slugs.len());
+                win.present(&frame);
+            }
         }
 
         if animating || hover_changed || redraw {

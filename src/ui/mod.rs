@@ -41,7 +41,12 @@ pub use text::{line_height, measure};
 pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
-pub const TABS: [&str; 10] = [
+///
+/// Nine, not ten: the Settings tab is gone. Settings live in their own
+/// top-level window (tray → Settings…), so the strip never spends its width on
+/// a tab the user does not browse. Dropping it also hands the remaining labels
+/// ~10% more width, which is what stops them reading as crammed.
+pub const TABS: [&str; 9] = [
     "Media",
     "Stats",
     "Timer",
@@ -51,7 +56,6 @@ pub const TABS: [&str; 10] = [
     "Calendar",
     "Shelf",
     "Terminal",
-    "Settings",
 ];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
@@ -60,7 +64,7 @@ pub const CONTENT_ROWS: usize = 3;
 /// Gap between tab items, from the reference's tab strip spacing.
 pub const TAB_GAP: f32 = 8.0;
 /// Horizontal padding inside the panel, applied on both sides.
-pub const PANEL_PAD: f32 = 16.0;
+pub const PANEL_PAD: f32 = 20.0;
 /// Top offset of the header row.
 pub const HEADER_Y: f32 = 16.0;
 /// Gap between the header's line box and the tab strip.
@@ -68,9 +72,8 @@ pub const HEADER_GAP: f32 = 6.0;
 /// Height of the tab strip band.
 pub const TAB_H: f32 = 20.0;
 /// Horizontal padding inside a tab, so its box is a superset of its
-/// label. 7, not the strip's old 10: ten tabs must fit the 608 px
-/// panel at the 8 px gap, and shrinking the chip keeps every label
-/// readable instead of collapsing the gaps to 0.
+/// label. Nine tabs fit comfortably at the 8 px gap; the padding stays so
+/// labels still read as chips instead of crammed text.
 pub const TAB_PAD: f32 = 7.0;
 /// Corner radius of the hovered/active tab's background pill.
 pub const TAB_RADIUS: f32 = 8.0;
@@ -393,8 +396,13 @@ impl ViewState {
 
     /// Which Settings row panel-space `(x, y)` hits: `0` the pet toggle, `1`
     /// the pet picker. Same contract as every other row hit-test.
+    ///
+    /// Unused by the notch itself — Settings render in their own window now —
+    /// but kept so the standalone window and the tab builder share one hit-test
+    /// rather than drifting apart.
+    #[allow(dead_code)]
     pub fn settings_hit(&self, x: f32, y: f32) -> Option<usize> {
-        if self.active_tab != SETTINGS_TAB || !self.content_visible() {
+        if !self.content_visible() {
             return None;
         }
         let top = HEADER_Y + header_height() + HEADER_GAP;
@@ -771,15 +779,8 @@ fn panel_content_for(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Nod
             state.terminal.as_ref(),
             state.terminal_error.as_deref(),
         ));
-    } else if tab == SETTINGS_TAB {
-        out.extend(settings::content(
-            fw,
-            fh,
-            tab_bottom,
-            state.pet_on,
-            state.pet_name.as_deref(),
-            state.pet_count,
-        ));
+        // Settings now live in their own window (tray → Settings…), so the
+        // expanded notch no longer hosts a Settings tab.
     } else {
         out.extend(content_rows(fw, fh, tab_bottom, state));
     }
@@ -803,8 +804,6 @@ pub const SHELF_TAB: usize = 7;
 pub const USAGE_TAB: usize = 5;
 /// The Terminal tab — the ConPTY grid.
 pub const TERMINAL_TAB: usize = 8;
-/// The Settings tab — pet on/off and the pet picker.
-pub const SETTINGS_TAB: usize = 9;
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {

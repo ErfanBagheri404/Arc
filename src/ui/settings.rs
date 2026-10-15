@@ -6,8 +6,13 @@
 //! writing yet.
 
 use crate::core::geom::{CornerRadii, Rect, Rgba};
-use crate::core::scene::{Node, TextStyle};
+use crate::core::scene::{Frame, Node, Scene, TextStyle};
 use crate::ui::{layout, line_height, measure, PANEL_PAD};
+
+/// Height of the window's caption block, so the rows start below the title.
+/// Shared by [`window_frame`] and [`window_row_hit`] — one number, so the
+/// drawn row and its click target cannot drift apart.
+pub const TITLE_H: f32 = 40.0;
 
 /// Clamp a rect inside the frame, as every ui module does before emitting.
 fn put(fw: f32, fh: f32, rect: Rect) -> Rect {
@@ -53,6 +58,14 @@ pub fn row_hit(fw: f32, top: f32, x: f32, y: f32) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Which row the **window's** client point `(x, y)` hits, in logical px.
+/// Offsets by the caption the way [`window_frame`] lays it out, so the click
+/// target and the drawn row cannot drift apart.
+#[must_use]
+pub fn window_row_hit(fw: f32, x: f32, y: f32) -> Option<usize> {
+    row_hit(fw, TITLE_H + 8.0, x, y)
 }
 
 /// The Settings tab's content, laid out under `top`.
@@ -153,6 +166,62 @@ fn chevrons(fw: f32, fh: f32, r: Rect) -> Node {
         text: "‹ ›".to_string(),
         style,
     }
+}
+
+/// The Settings window's own frame. Same rows as the tab used to render, but
+/// wrapped for a real window: a rounded dark sheet with a caption above.
+///
+/// `fw`/`fh` are the client size in logical px, fixed by
+/// [`crate::platform::settings_window`]. The rows still come from [`content`]
+/// so the notch and the window can never disagree about what a row looks like.
+pub fn window_frame(
+    fw: f32,
+    fh: f32,
+    pet_on: bool,
+    pet_name: Option<&str>,
+    pet_count: usize,
+) -> Frame {
+    let mut scene = Scene::new();
+    scene.push(Node::RoundRect {
+        rect: Rect::new(0.0, 0.0, fw, fh),
+        radii: CornerRadii::uniform(12.0).clamped(fw, fh),
+        fill: Rgba::rgb(0.09, 0.09, 0.10),
+    });
+
+    let mut out = Vec::new();
+    out.extend(caption(fw, fh, "Settings"));
+    let content_top = TITLE_H + 8.0;
+    out.extend(content(
+        fw,
+        fh,
+        content_top,
+        pet_on,
+        pet_name,
+        pet_count,
+    ));
+    for node in out {
+        scene.push(node);
+    }
+    Frame {
+        size: (fw, fh),
+        scene,
+    }
+}
+
+/// The window's own title, above the rows. A settings window is not the notch:
+/// it gets a plain caption instead of the island's header.
+fn caption(fw: f32, fh: f32, text: &str) -> Vec<Node> {
+    let style = TextStyle::title();
+    let h = line_height(&style);
+    vec![Node::Text {
+        rect: put(
+            fw,
+            fh,
+            Rect::new(PANEL_PAD, 14.0, (fw - PANEL_PAD * 2.0).max(0.0), h),
+        ),
+        text: text.to_string(),
+        style,
+    }]
 }
 
 #[cfg(test)]
