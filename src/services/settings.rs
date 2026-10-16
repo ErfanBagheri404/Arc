@@ -65,9 +65,20 @@ pub fn get_string(table: &toml::Table, key: &str, fallback: &str) -> String {
         .to_string()
 }
 
+/// A persistent floating-point number with a fallback.
+#[must_use]
+pub fn get_f64(table: &toml::Table, key: &str, fallback: f64) -> f64 {
+    table.get(key).and_then(|v| v.as_float()).unwrap_or(fallback)
+}
+
 /// Write one string into a table.
 pub fn set_string(table: &mut toml::Table, key: &str, value: &str) {
     table.insert(key.to_string(), toml::Value::String(value.to_string()));
+}
+
+/// Write one floating-point number into a table.
+pub fn set_f64(table: &mut toml::Table, key: &str, value: f64) {
+    table.insert(key.to_string(), toml::Value::Float(value));
 }
 
 #[cfg(test)]

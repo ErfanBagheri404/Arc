@@ -102,6 +102,31 @@ impl Rgba {
         (h * 60.0, s, v)
     }
 
+    /// Parse `#rrggbb` (the on-disk form Settings persists colors as). `None`
+    /// on any malformed input — a hand-edited file must fall back to a default,
+    /// not turn the notch a surprising color.
+    #[must_use]
+    pub fn parse_hex(s: &str) -> Option<Self> {
+        let s = s.strip_prefix('#')?.trim();
+        if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let v = u32::from_str_radix(s, 16).ok()?;
+        Some(Self::rgb(
+            ((v >> 16) & 0xff) as f32 / 255.0,
+            ((v >> 8) & 0xff) as f32 / 255.0,
+            (v & 0xff) as f32 / 255.0,
+        ))
+    }
+
+    /// Lower-case `#rrggbb`, what [`settings::set_string`] writes. Round-trips
+    /// through [`Self::parse_hex`].
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        let c = |f: f32| ((f.clamp(0.0, 1.0) * 255.0).round() as u32).min(255);
+        format!("#{:02x}{:02x}{:02x}", c(self.r), c(self.g), c(self.b))
+    }
+
     /// Inverse of `to_hsv`.
     pub fn from_hsv(h: f32, s: f32, v: f32) -> Self {
         let h = h.rem_euclid(360.0);
@@ -128,6 +153,13 @@ pub struct CornerRadii {
     pub top_right: f32,
     pub bottom_right: f32,
     pub bottom_left: f32,
+}
+
+/// Default is opaque black — the natural fill for notch/disabled surfaces.
+impl Default for Rgba {
+    fn default() -> Self {
+        Self::BLACK
+    }
 }
 
 impl CornerRadii {

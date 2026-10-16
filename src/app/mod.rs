@@ -36,29 +36,114 @@ use timer::{Timer, PRESETS};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-/// Apply a settings-row click: row 0 toggles the idle pet, row 1 cycles the
-/// installed pets. Persisted immediately — settings are read at boot, so a
-/// change that was not written would not survive a restart.
-fn apply_settings_row(
-    hit: usize,
+/// Apply a Settings sheet click and persist it. Sheet clicks are how the user
+/// reaches every knob now, so the view carries the mirrored state (pet on/off,
+/// name, size, notch color) and the caller repaints from it. Every knob writes
+/// to `settings.toml` immediately — settings are read at boot, so a change that
+/// was not written would not survive a restart.
+///
+/// Returns the newly configured pet slug when the equipped pet changed, so the
+/// caller can keep its boot-time copy in sync with what was just written —
+/// `None` for every other action.
+fn apply_settings_action(
+    action: &ui::settings::Action,
     pet: &mut pet::PetState,
     pet_on: &mut bool,
-    pet_slugs: &[String],
-) {
+    clip: &Clipboard,
+    view: &mut ui::ViewState,
+) -> Option<String> {
     let mut t = settings::load();
-    if hit == 0 {
-        *pet_on = !*pet_on;
-        settings::set_bool(&mut t, "pet_enabled", *pet_on);
-    } else if !pet_slugs.is_empty() {
-        let at = pet.slug().and_then(|s| pet_slugs.iter().position(|k| k == s));
-        let next = match at {
-            Some(i) => pet_slugs[(i + 1) % pet_slugs.len()].clone(),
-            None => pet_slugs[0].clone(),
-        };
-        pet.reload(&next);
-        settings::set_string(&mut t, "pet_slug", &next);
-    }
+    let equipped = match action {
+        ui::settings::Action::PetToggle => {
+            *pet_on = !*pet_on;
+            settings::set_bool(&mut t, "pet_enabled", *pet_on);
+            view.pet_on = *pet_on;
+            None
+        }
+        ui::settings::Action::Equip(slug) => {
+            pet.reload(slug);
+            pet::set_equipped(slug);
+            settings::set_string(&mut t, "pet_slug", slug);
+            Some(slug.clone())
+        }
+        ui::settings::Action::Install(slug) => {
+            pet::request_install(slug);
+            None
+        }
+        ui::settings::Action::Remove(slug) => {
+            pet::request_uninstall(slug);
+            None
+        }
+        ui::settings::Action::NotchColor(i) => {
+            if let Some(color) = ui::settings::NOTCH_SWATCHES.get(*i) {
+                // The swatch is stored as the hex it came from, so a restart
+                // restores exactly the color that was clicked.
+                settings::set_string(&mut t, "notch_bg", &color.to_hex());
+                view.notch_bg = *color;
+            }
+            None
+        }
+        ui::settings::Action::ClipToggle => {
+            let next = !clip.enabled();
+            clip.set_enabled(next);
+            settings::set_bool(&mut t, "clip_enabled", next);
+            view.clip_enabled = next;
+            None
+        }
+        ui::settings::Action::PetScaleDown | ui::settings::Action::PetScaleUp => {
+            let up = matches!(action, ui::settings::Action::PetScaleUp);
+            let step = ui::settings::SCALE_STEP * if up { 1.0 } else { -1.0 };
+            let next = ui::settings::scale_snapped(settings::get_f64(&t, "pet_scale", 1.0) + step);
+            settings::set_f64(&mut t, "pet_scale", next);
+            // The view carries the offset from neutral, not the absolute size,
+            // so `ViewState::default()` already reads as the un-zoomed pet.
+            view.pet_zoom = (next - 1.0) as f32;
+            None
+        }
+    };
     settings::save(&t);
+    equipped
+}
+
+/// The notch body background color from settings. Falls back to the notch's
+/// historical black for a missing or hand-mangled value: a settings file that
+/// was edited by hand must not surface as a color nobody picked.
+fn notch_bg_from(table: &toml::Table) -> crate::core::geom::Rgba {
+    crate::core::geom::Rgba::parse_hex(&settings::get_string(table, "notch_bg", ""))
+        .unwrap_or(crate::core::geom::Rgba::BLACK)
+}
+
+/// Build the Settings sheet's state for one paint: the knobs' current values
+/// plus the gallery the user is actually looking at.
+fn settings_model(
+    pet_on: bool,
+    pet_slugs: &[String],
+    clip_on: bool,
+    equipped: Option<String>,
+    view: &ui::ViewState,
+    gallery: pet::GallerySnapshot,
+    scroll: f32,
+) -> ui::settings::Model {
+    ui::settings::Model {
+        pet_on,
+        pet_count: pet_slugs.len(),
+        equipped,
+        notch_bg: view.notch_bg,
+        clip_on,
+        pet_scale: settings::get_f64(&settings::load(), "pet_scale", 1.0),
+        gallery: Some(gallery),
+        scroll,
+    }
+}
+
+/// Hold the Settings sheet's scroll inside its content, so the wheel can never
+/// leave the sheet parked past its last row with the window looking empty.
+/// Rebuilds the sheet from the caller's already-built model to learn its height,
+/// which is cheap (it is pure layout, no I/O) and keeps the two from disagreeing.
+/// `content_h` does not depend on the model's scroll, so the caller's value is fine.
+fn clamp_settings_scroll(fh: f32, model: &ui::settings::Model, wanted: f32) -> f32 {
+    let max = (ui::settings::sheet(settings_window::LOGICAL_W, fh, model).content_h - fh).max(0.0);
+    wanted.clamp(0.0, max)
 }
 
 /// The wall-clock runner entry point.
@@ -129,7 +214,57 @@ const NOMINAL_FRAME: Duration = Duration::from_micros(16_667);
 /// Also the hover-polling cadence: a collapsed island is click-through, so the
 /// pointer has to be sampled rather than awaited. 25 ms is under one frame at
 /// 40 Hz and still leaves the process ~0% CPU.
-const IDLE_POLL: Duration = Duration::from_millis(25);
+const IDLE_POLL: Duration = Duration::from_millis(200);
+
+/// TEMP DEBUG: which site set redraw this iteration.
+static DBG_REASON: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const DBG_REASONS: [&str; 31] = [
+    "none", "vis_toggle", "filedrop", "pill_toggle", "media_cmd", "timer_preset", "clip_hit",
+    "cal_hit", "shelf_hit", "settings_hit", "tab_click", "cursor_moved", "cursor_left", "key",
+    "resize", "media_snap", "stats_snap", "petframe", "hud_expire", "power", "drive", "picker",
+    "clip_snap", "cal_snap", "usage_snap", "dl_snap", "mic", "volume", "timer_view",
+    "timer_zero", "timer_run",
+];
+/// TEMP DEBUG: microseconds spent in the draw block of the last painted frame.
+static DBG_DRAW_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_BUILD_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_PRESENT_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn dbg_reason(i: usize) {
+    DBG_REASON.fetch_or(1 << i, std::sync::atomic::Ordering::Relaxed);
+}
+fn dbg_take_reasons() -> String {
+    let bits = DBG_REASON.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let mut out = Vec::new();
+    for (i, name) in DBG_REASONS.iter().enumerate() {
+        if bits & (1 << i) != 0 {
+            out.push(*name);
+        }
+    }
+    if out.is_empty() {
+        "none".to_string()
+    } else {
+        out.join("+")
+    }
+}
+
+
+/// TEMP DEBUG
+pub fn dbg_spawn_log(name: &str) {
+    use std::io::Write as _;
+    if std::env::var("ARC_DBG_LOOP").is_err() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"C:\Users\mrenm\AppData\Local\hermes\cache\scratch\arc_dbg.log")
+    {
+        let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        let _ = writeln!(f, "SPAWN {} tid={}", name, tid);
+    }
+    let _ = name;
+}
 /// Power-state poll cadence. `GetSystemPowerStatus` is cheap, but there is no
 /// change notification worth wiring, and 500 ms is well inside the HUD's 3 s
 /// window, so a plug/unplug is never missed.
@@ -334,12 +469,21 @@ pub fn run() -> std::process::ExitCode {
     let boot = settings::load();
     let mut pet = pet::PetState::default();
     let mut pet_on = settings::get_bool(&boot, "pet_enabled", true);
-    let pet_slug = settings::get_string(&boot, "pet_slug", "");
-    let pet_slugs = pet::installed();
+    let mut pet_slug = settings::get_string(&boot, "pet_slug", "");
+    let mut pet_slugs = pet::installed();
     pet.reload(&pet_slug);
     view.pet_on = pet_on;
-    view.pet_count = pet_slugs.len();
-    view.pet_name = pet.name().map(str::to_string);
+    view.notch_bg = notch_bg_from(&boot);
+    view.pet_zoom = (ui::settings::scale_snapped(settings::get_f64(&boot, "pet_scale", 1.0)) - 1.0) as f32;
+    // The gallery lives in the pet service's worker; asking for a snapshot at
+    // boot starts the manifest fetch, so the sheet has tiles to show the first
+    // time the user opens it instead of an empty "Loading…".
+    let mut gallery = pet::snapshot();
+    let mut gallery_v = gallery.version;
+    pet::request_thumbs(&gallery.tiles.iter().map(|t| t.slug.clone()).collect::<Vec<_>>());
+    // Settings window scroll, in logical px. The window is fixed-size, so this
+    // is the only thing that moves the sheet's contents.
+    let mut settings_scroll = 0.0_f32;
     overlay.show();
 
     // First paint before the loop: with no events yet, the dirty-frame loop would
@@ -353,7 +497,7 @@ pub fn run() -> std::process::ExitCode {
     view.island_width = state.logical_width();
     view.island_height = state.logical_height();
     let frame = ui::build(&view);
-    renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x());
+    renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x(), true);
 
     let mut last = Instant::now();
     loop {
@@ -377,12 +521,14 @@ pub fn run() -> std::process::ExitCode {
                 // Ctrl+Shift+Z: user owns visibility from here on.
                 Event::ToggleVisibility => {
                     state.toggle_visibility();
+                    dbg_reason(1);
                     redraw = true;
                 }
                 // A file dropped on the island pins to the shelf.
                 Event::FilesDropped { paths } => {
                     for p in paths {
                         if shelf.pin(std::path::Path::new(&p)) {
+                            dbg_reason(2);
                             redraw = true;
                         }
                     }
@@ -408,14 +554,17 @@ pub fn run() -> std::process::ExitCode {
                     // toggles the island (DynamicNotch/Atoll behaviour).
                     if !state.expanded() {
                         state.toggle();
+                        dbg_reason(3);
                         redraw = true;
                     }
                     if let Some(cmd) = view.media_command(lx, ly) {
                         media.send(cmd);
+                        dbg_reason(4);
                         redraw = true;
                     } else if let Some(preset) = view.timer_preset(lx, ly) {
                         if timer.click(preset, Instant::now()) {
                             view.timer = timer.view;
+                            dbg_reason(5);
                             redraw = true;
                         }
                     } else if let Some(hit) = view.picker_hit(lx, ly) {
@@ -439,6 +588,7 @@ pub fn run() -> std::process::ExitCode {
                         } else if let Some(entry) = view.clip_entries.get(hit - 1) {
                             let _ = Clipboard::restore(&entry.text.clone());
                         }
+                        dbg_reason(6);
                         redraw = true;
                     } else if let Some(hit) = view.calendar_hit(lx, ly) {
                         // Row 0 pastes the clipboard as a new `.ics` URL; any
@@ -454,6 +604,7 @@ pub fn run() -> std::process::ExitCode {
                             cals.unsubscribe(&sub.url.clone());
                             view.cal = cals.snapshot();
                         }
+                        dbg_reason(7);
                         redraw = true;
                     } else if let Some(i) = view.shelf_hit(lx, ly) {
                         // A pinned tile opens with its default handler; a
@@ -469,13 +620,10 @@ pub fn run() -> std::process::ExitCode {
                                 view.shelf = shelf.items().to_vec();
                             }
                         }
-                        redraw = true;
-                    } else if let Some(hit) = view.settings_hit(lx, ly) {
-                        apply_settings_row(hit, &mut pet, &mut pet_on, &pet_slugs);
-                        view.pet_on = pet_on;
-                        view.pet_name = pet.name().map(str::to_string);
+                        dbg_reason(8);
                         redraw = true;
                     } else if view.click_tab(lx, ly).is_some() {
+                        dbg_reason(10);
                         redraw = true;
                     }
                 }
@@ -490,11 +638,13 @@ pub fn run() -> std::process::ExitCode {
                     if tab != view.hover_tab || row != view.hover_row {
                         view.hover_tab = tab;
                         view.hover_row = row;
+                        dbg_reason(11);
                         redraw = true;
                     }
                 }
                 Event::CursorLeft => {
                     if view.hover_tab.take().is_some() | view.hover_row.take().is_some() {
+                        dbg_reason(12);
                         redraw = true;
                     }
                 }
@@ -511,6 +661,7 @@ pub fn run() -> std::process::ExitCode {
                             let mut buf = [0u8; 4];
                             terminal.write(ch.encode_utf8(&mut buf).as_bytes());
                         }
+                        dbg_reason(13);
                         redraw = true;
                     }
                 }
@@ -520,6 +671,7 @@ pub fn run() -> std::process::ExitCode {
                     if view.active_tab == ui::TERMINAL_TAB {
                         terminal.resize(80, 24);
                     }
+                    dbg_reason(14);
                     redraw = true;
                 }
                 Event::Quit => return std::process::ExitCode::SUCCESS,
@@ -532,11 +684,17 @@ pub fn run() -> std::process::ExitCode {
             }
         }
 
+        if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 1 {
+            last = Instant::now();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
         // Pull the latest snapshot every iteration. The worker publishes at 1 Hz,
         // so this is a mutex read, not a COM call.
         let snapshot = media.snapshot();
         if snapshot != view.media {
             view.media = snapshot;
+            dbg_reason(15);
             redraw = true;
         }
 
@@ -545,9 +703,16 @@ pub fn run() -> std::process::ExitCode {
         let latest = stats.snapshot();
         if latest.current != view.stats.current {
             view.stats = latest;
+            dbg_reason(16);
             redraw = true;
         }
 
+
+        if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 2 {
+            last = Instant::now();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
         let now = Instant::now();
         let dt = now.duration_since(last).min(Duration::from_millis(100));
 
@@ -559,6 +724,7 @@ pub fn run() -> std::process::ExitCode {
             let frame = pet.frame_at(now);
             if frame != view.pet {
                 view.pet = frame;
+                dbg_reason(17);
                 redraw = true;
             }
         }
@@ -568,6 +734,7 @@ pub fn run() -> std::process::ExitCode {
         // a half-second cadence right here rather than on a worker thread.
         if hud.step(now) {
             view.hud = None;
+            dbg_reason(18);
             redraw = true;
         }
         if now.duration_since(last_power) >= POWER_POLL {
@@ -576,6 +743,7 @@ pub fn run() -> std::process::ExitCode {
                 let armed = power_hud(&p, &mut last_power_state, now, &mut hud);
                 if armed {
                     view.hud = hud.current();
+                    dbg_reason(19);
                     redraw = true;
                 }
             }
@@ -611,9 +779,17 @@ pub fn run() -> std::process::ExitCode {
             last_drive = Some(drive);
             if armed {
                 view.hud = hud.current();
+                dbg_reason(20);
                 redraw = true;
             }
         }
+
+        if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 3 {
+            last = Instant::now();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+
         // Audio: read the worker's snapshot every frame (a mutex read) and arm
         // the volume HUD on change. The mic flag is not a HUD — it is a standing
         // indicator, so it just rides on the view.
@@ -634,6 +810,7 @@ pub fn run() -> std::process::ExitCode {
             if unsafe { GetCursorPos(&mut pt) }.is_ok() {
                 let before = picker.current();
                 if picker.sample_at(pt.x, pt.y).is_some() && picker.current() != before {
+                    dbg_reason(21);
                     redraw = true;
                 }
             }
@@ -647,29 +824,42 @@ pub fn run() -> std::process::ExitCode {
         if clip_entries != view.clip_entries || clip_enabled != view.clip_enabled {
             view.clip_entries = clip_entries;
             view.clip_enabled = clip_enabled;
+            dbg_reason(22);
             redraw = true;
         }
         let cal = cals.snapshot();
         if cal != view.cal {
             view.cal = cal;
+            dbg_reason(23);
             redraw = true;
         }
+
+        if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 4 {
+            last = Instant::now();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+
         let usg = usage.snapshot();
         if usg != view.usage {
             view.usage = usg;
+            dbg_reason(24);
             redraw = true;
         }
         let dl = downloads.snapshot();
         if dl != view.downloads {
             view.downloads = dl;
+            dbg_reason(25);
             redraw = true;
         }
         if a.mic_active != view.mic_active {
             view.mic_active = a.mic_active;
+            dbg_reason(26);
             redraw = true;
         }
         if volume_hud(&a, &mut last_audio_state, now, &mut hud) {
             view.hud = hud.current();
+            dbg_reason(27);
             redraw = true;
         }
 
@@ -677,6 +867,7 @@ pub fn run() -> std::process::ExitCode {
         // it, so the frame is dirty every second regardless of hover or media.
         if timer.view.remaining != view.timer.remaining || timer.view.preset != view.timer.preset {
             view.timer = timer.view;
+            dbg_reason(28);
             redraw = true;
         }
         if timer.step(now) {
@@ -690,6 +881,7 @@ pub fn run() -> std::process::ExitCode {
                 now,
             );
             view.hud = hud.current();
+            dbg_reason(29);
             redraw = true;
         } else if timer.running {
             hud.arm(
@@ -700,6 +892,7 @@ pub fn run() -> std::process::ExitCode {
                 now,
             );
             view.hud = hud.current();
+            dbg_reason(30);
             redraw = true;
         }
 
@@ -722,6 +915,13 @@ pub fn run() -> std::process::ExitCode {
         );
         let animating = state.step_dt(dt.as_secs_f32()) || swap_busy || viz_busy;
 
+
+        if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 5 {
+            last = Instant::now();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+
         // A hidden island is not just un-drawn: it is removed from the screen so
         // it cannot sit over the fullscreen app it is hiding for.
         if state.hidden() {
@@ -743,35 +943,148 @@ pub fn run() -> std::process::ExitCode {
             };
             settings_dirty = true;
         }
+        // The pet gallery lives on its own worker thread (manifest fetch,
+        // thumbnail and full downloads), so the app polls its version instead of
+        // blocking on it. A bumped version means the sheet's tiles changed —
+        // mark it dirty if it is open, and refresh the installed list so a
+        // finished download can be equipped. Thumbs are requested for every
+        // tile that does not yet have one; the worker ignores slugs it has
+        // already tried, so this converges instead of looping.
+        let snap = pet::snapshot();
+        if snap.version != gallery_v {
+            gallery_v = snap.version;
+            gallery = snap;
+            let missing: Vec<String> = gallery
+                .tiles
+                .iter()
+                .filter(|t| t.thumb.is_none() && !t.busy && !t.failed)
+                .map(|t| t.slug.clone())
+                .collect();
+            if !missing.is_empty() {
+                pet::request_thumbs(&missing);
+            }
+            let installed_now = pet::installed();
+            if installed_now != pet_slugs {
+                pet_slugs = installed_now;
+                // Auto-load the pet if its install just finished and it is the
+                // configured one — the notch should light up without the user
+                // having to click Equipped after downloading.
+                if !pet_slug.is_empty()
+                    && pet_slugs.iter().any(|s| s == &pet_slug)
+                    && pet.slug().is_none_or(|s| s != pet_slug)
+                {
+                    pet.reload(&pet_slug);
+                }
+            }
+            settings_dirty = true;
+        }
         if let Some(win) = settings_win.as_mut() {
             win.pump();
+            let (fw, fh) = win.logical_size();
+            let scale = win.scale().max(0.01);
             for ev in win.take_events() {
-                if let SettingsEvent::Click { x, y } = ev {
-                    // Client-space physical px → logical px.
-                    let scale = win.scale().max(0.01);
-                    let (fw, _fh) = win.logical_size();
-                    if let Some(row) =
-                        ui::settings::window_row_hit(fw, x as f32 / scale, y as f32 / scale)
-                    {
-                        apply_settings_row(row, &mut pet, &mut pet_on, &pet_slugs);
-                        view.pet_on = pet_on;
-                        view.pet_name = pet.name().map(str::to_string);
+                match ev {
+                    SettingsEvent::Click { x, y } => {
+                        // Client-space physical px → logical px.
+                        let model = settings_model(
+                            pet_on,
+                            &pet_slugs,
+                            clip.enabled(),
+                            pet.name().map(str::to_string),
+                            &view,
+                            gallery.clone(),
+                            settings_scroll,
+                        );
+                        if let Some(action) = ui::settings::window_hit(
+                            fw,
+                            fh,
+                            &model,
+                            x as f32 / scale,
+                            y as f32 / scale,
+                        ) {
+                            if let Some(slug) =
+                                apply_settings_action(&action, &mut pet, &mut pet_on, &clip, &mut view)
+                            {
+                                pet_slug = slug;
+                            }
+                        }
                     }
-                    settings_dirty = true;
+                    SettingsEvent::Scroll { delta } => {
+                        let step = delta as f32 / settings_window::WHEEL_DELTA as f32;
+                        let model = settings_model(
+                            pet_on,
+                            &pet_slugs,
+                            clip.enabled(),
+                            pet.name().map(str::to_string),
+                            &view,
+                            gallery.clone(),
+                            settings_scroll,
+                        );
+                        settings_scroll = clamp_settings_scroll(
+                            fh,
+                            &model,
+                            settings_scroll - step * settings_window::SCROLL_STEP,
+                        );
+                    }
+                    SettingsEvent::Closed => {}
                 }
+                settings_dirty = true;
             }
             if settings_dirty && win.visible() {
                 settings_dirty = false;
-                let (fw, fh) = win.logical_size();
-                let name = view.pet_name.clone();
-                let frame =
-                    ui::settings::window_frame(fw, fh, pet_on, name.as_deref(), pet_slugs.len());
+                let model = settings_model(
+                    pet_on,
+                    &pet_slugs,
+                    clip.enabled(),
+                    pet.name().map(str::to_string),
+                    &view,
+                    gallery.clone(),
+                    settings_scroll,
+                );
+                let frame = ui::settings::window_frame(fw, fh, &model);
                 win.present(&frame);
             }
         }
 
+        if std::env::var("ARC_DBG_LOOP").is_ok() {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(r"C:\Users\mrenm\AppData\Local\hermes\cache\scratch\arc_dbg.log")
+            {
+                let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+                let _ = writeln!(
+                    f,
+                    "{} tid={} anim={} swap={} viz={} hover={} redraw={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={}",
+                    now.elapsed().as_micros(),
+                    tid,
+                    animating,
+                    view.tab_swap.debug_busy(),
+                    view.viz.debug_busy(),
+                    hover_changed,
+                    redraw,
+                    DBG_DRAW_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_BUILD_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_PRESENT_US.load(std::sync::atomic::Ordering::Relaxed),
+                    dbg_take_reasons(),
+                    crate::platform::render::DBG_ACQ_US.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::render::DBG_ENDDRAW_US.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::render::DBG_RS_PRESENT_US.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::render::DBG_NODES.load(std::sync::atomic::Ordering::Relaxed)
+                );
+            }
+        }
+
+        if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 6 {
+            last = Instant::now();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+
         if animating || hover_changed || redraw {
             last = now;
+            let dbg_draw_t0 = Instant::now();
 
             // Fixed frame: these calls early-out unless mode/DPI/monitor
             // changed, so the morph costs no SetWindowPos and no ResizeBuffers.
@@ -794,12 +1107,28 @@ pub fn run() -> std::process::ExitCode {
             );
             view.island_width = state.logical_width();
             view.island_height = state.logical_height();
+            let dbg_t1 = Instant::now();
             let frame = ui::build(&view);
+            let dbg_t2 = Instant::now();
             renderer.present(
                 &frame,
                 overlay.dpi().scale,
                 dt.as_secs_f32(),
                 state.body_offset_x(),
+                animating,
+            );
+            let dbg_t3 = Instant::now();
+            DBG_DRAW_US.store(
+                dbg_t2.duration_since(dbg_draw_t0).as_micros() as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            DBG_BUILD_US.store(
+                dbg_t1.duration_since(dbg_draw_t0).as_micros() as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            DBG_PRESENT_US.store(
+                dbg_t3.duration_since(dbg_t2).as_micros() as usize,
+                std::sync::atomic::Ordering::Relaxed,
             );
         } else {
             // Park: no presents, no spring integration. Re-arm the clock so the

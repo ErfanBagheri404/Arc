@@ -196,6 +196,55 @@ fn looks_like_vpn(description: &str) -> bool {
     d.contains("VPN") || d.contains("TUNNEL") || d.contains("WIREGUARD")
 }
 
+/// One HTTPS GET that returns raw bytes, capped at `cap` bytes. `None` on any
+/// failure: callers (pet downloads) tolerate soft failures as \"not installed\".
+pub fn get_bytes(url: &str, cap: usize) -> Option<Vec<u8>> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Networking::WinInet::{
+        InternetCloseHandle, InternetOpenUrlW, InternetOpenW, InternetReadFile,
+        INTERNET_FLAG_NO_CACHE_WRITE, INTERNET_FLAG_RELOAD, INTERNET_FLAG_SECURE,
+        INTERNET_OPEN_TYPE_PRECONFIG,
+    };
+    let agent: Vec<u16> = "Arc\0".encode_utf16().collect();
+    let mut wide: Vec<u16> = url.encode_utf16().collect();
+    wide.push(0);
+    // SAFETY: WinINet calls are well-formed; handles are guarded.
+    unsafe {
+        let h = InternetOpenW(PCWSTR(agent.as_ptr()), INTERNET_OPEN_TYPE_PRECONFIG.0, None, None, 0);
+        if h.is_null() {
+            return None;
+        }
+        struct S(*const core::ffi::c_void);
+        impl Drop for S {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = InternetCloseHandle(self.0);
+                }
+            }
+        }
+        let _s = S(h);
+        let flags = INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
+        let file = InternetOpenUrlW(h, PCWSTR(wide.as_ptr()), None, flags, None);
+        if file.is_null() {
+            return None;
+        }
+        let _f = S(file);
+        let mut body = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let mut n = 0u32;
+            if InternetReadFile(file, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n).is_err() || n == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..n as usize]);
+            if body.len() > cap {
+                break;
+            }
+        }
+        if body.is_empty() { None } else { Some(body) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

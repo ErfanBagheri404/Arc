@@ -71,10 +71,13 @@ impl Audio {
 }
 
 fn run(shared: Arc<Mutex<AudioState>>) {
+        crate::app::dbg_spawn_log("audio.rs");
     let mut out_meter: Option<IAudioMeterInformation> = None;
     // SAFETY: MTA apartment for this thread alone; the media service uses the
     // same model. Refusing audio (audio-less session) is fine.
+    crate::app::dbg_spawn_log("audio:entry");
     let _com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok();
+    crate::app::dbg_spawn_log("audio:com");
 
     let enumerator: windows::core::Result<IMMDeviceEnumerator> =
         unsafe { CoCreateInstance(&MMDEVICE_ENUMERATOR_CLSID, None, CLSCTX_INPROC_SERVER) };
@@ -86,6 +89,7 @@ fn run(shared: Arc<Mutex<AudioState>>) {
     let mut meter: Option<(IMMDevice, IAudioMeterInformation)> = None;
     let mut mic_active_until: Option<Instant> = None;
 
+    crate::app::dbg_spawn_log("audio:loop");
     loop {
         std::thread::sleep(POLL);
         let now = Instant::now();

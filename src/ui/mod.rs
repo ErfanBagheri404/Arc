@@ -216,10 +216,12 @@ pub struct ViewState {
     pub pet: Option<crate::services::pet::PetFrame>,
     /// The pet on/off row mirrors this.
     pub pet_on: bool,
-    /// The selected pet's display name, for the Settings picker row.
-    pub pet_name: Option<String>,
-    /// How many pets are installed — the picker only offers a choice when > 1.
-    pub pet_count: usize,
+    /// The pet's size offset from 1.0, as the Settings "Pet size" row steps it.
+    /// Stored as an offset so `Default` (0.0) is already the neutral size and
+    /// nothing has to remember to seed it.
+    pub pet_zoom: f32,
+    /// Notch body background color, user-customizable from Settings.
+    pub notch_bg: Rgba,
 }
 
 /// A tab content swap in flight — crossfade, then rise.
@@ -286,6 +288,11 @@ impl TabSwap {
         }
         let rising = self.rise.step(dt);
         fading || rising
+    }
+
+    /// Diagnostic only: is either spring still integrating?
+    pub fn debug_busy(&self) -> bool {
+        self.phase.as_ref().is_some_and(|f| f.is_animating()) || self.rise.is_animating()
     }
 }
 
@@ -409,21 +416,6 @@ impl ViewState {
         shelf::tile_at(self.island_width, row_band_top(), &self.shelf, x, y)
     }
 
-    /// Which Settings row panel-space `(x, y)` hits: `0` the pet toggle, `1`
-    /// the pet picker. Same contract as every other row hit-test.
-    ///
-    /// Unused by the notch itself — Settings render in their own window now —
-    /// but kept so the standalone window and the tab builder share one hit-test
-    /// rather than drifting apart.
-    #[allow(dead_code)]
-    pub fn settings_hit(&self, x: f32, y: f32) -> Option<usize> {
-        if !self.content_visible() {
-            return None;
-        }
-        let top = HEADER_Y + header_height() + HEADER_GAP;
-        settings::row_hit(self.island_width, top, x, y)
-    }
-
     /// Which color-picker control panel-space `(x, y)` hits: `0` is the
     /// readout (copies the current hex), `Some(i + 1)` is trail swatch `i`.
     pub fn picker_hit(&self, x: f32, y: f32) -> Option<usize> {
@@ -447,6 +439,14 @@ impl ViewState {
         timer::buttons(self.island_width, top)
             .into_iter()
             .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
+    }
+
+    /// The pet's drawn scale factor: 1.0 plus the user's size offset, held
+    /// inside the range the Settings "Pet size" row offers. Reading it here
+    /// (rather than letting the two draw sites clamp separately) keeps the
+    /// sprite and the standing-label slot it must clear in agreement.
+    fn pet_scale(&self) -> f32 {
+        (1.0 + self.pet_zoom).clamp(settings::SCALE_MIN as f32, settings::SCALE_MAX as f32)
     }
 
     /// Whether the panel content (tabs, rows, footer) is on screen at all.
@@ -496,7 +496,7 @@ pub fn build(state: &ViewState) -> Frame {
             bottom_right: radius,
         }
         .clamped(fw, fh),
-        fill: Rgba::BLACK,
+        fill: state.notch_bg,
     });
 
     // A zero-sized island emits nothing else: there is nothing to lay out inside,
@@ -535,8 +535,11 @@ pub fn build(state: &ViewState) -> Frame {
                     // preserving the sprite's aspect. The height is the COLLAPSED
                     // pill's, not `fh`: `fh` is mid-spring during a hover-expand,
                     // and sizing from it ballooned the pet across the morph — the
-                    // "flicks frames when the notch expands" report.
-                    let h = crate::ui::layout::PILL_H_REF - PILL_PET_PAD * 2.0;
+                    // "flicks frames when the notch expands" report. The user's
+                    // size choice scales that fit, capped so a larger mascot
+                    // still ends inside the pill's rounded ends.
+                    let h = (crate::ui::layout::PILL_H_REF - PILL_PET_PAD * 2.0)
+                        * state.pet_scale();
                     let w = h * (sw / sh);
                     scene.push(Node::Sprite {
                         rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
@@ -594,7 +597,7 @@ pub fn build(state: &ViewState) -> Frame {
         let slot_w = match (&state.pet, state.media.playing) {
             (Some(p), false) => {
                 let (_, _, sw, sh) = crate::services::pet::frame_rect(p.frame);
-                (layout::PILL_H_REF - PILL_PET_PAD * 2.0) * (sw / sh)
+                ((layout::PILL_H_REF - PILL_PET_PAD * 2.0) * state.pet_scale()) * (sw / sh)
             }
             _ => VIZ_BAR_W * 4.0 + VIZ_GAP * 3.0,
         };
@@ -1102,8 +1105,6 @@ fn content_rows(fw: f32, fh: f32, top: f32, state: &ViewState) -> Vec<Node> {
 #[derive(Debug, Clone)]
 pub struct Viz {
     bars: [crate::core::anim::Spring; 4],
-    /// Wall-clock phase for the idle shimmer when nothing is playing.
-    t: f32,
 }
 
 impl Default for Viz {
@@ -1115,7 +1116,6 @@ impl Default for Viz {
                     crate::core::anim::SpringConfig::new(0.18, 0.55),
                 )
             }),
-            t: 0.0,
         }
     }
 }
@@ -1123,20 +1123,27 @@ impl Default for Viz {
 impl Viz {
     /// Drive toward a fresh meter reading. `levels` are 0..=1 peaks; the app
     /// thread passes the same snapshot every frame, so springs do the smoothing.
+    ///
+    /// Paused, the spectrum is NOT drawn (the resting glyph sits in the slot
+    /// instead), so integrating it would chase a target nobody can see and keep
+    /// `animating` true forever — the notch redrawing 60 times a second while
+    /// idle. The springs simply freeze and hold their last heights; playback
+    /// relights them from that value.
     pub fn step(&mut self, dt: f32, levels: [f32; 4], playing: bool) -> bool {
-        self.t += dt;
+        if !playing {
+            return false;
+        }
         let mut moved = false;
         for (i, bar) in self.bars.iter_mut().enumerate() {
-            // Idle: a gentle travelling wave so the bars read alive but calm.
-            let target = if playing {
-                levels[i].clamp(0.08, 1.0)
-            } else {
-                0.18 + 0.10 * (self.t * 2.2 + i as f32 * 0.9).sin()
-            };
-            bar.set_target(target);
+            bar.set_target(levels[i].clamp(0.08, 1.0));
             moved |= bar.step(dt);
         }
         moved
+    }
+
+    /// True when the springs are still integrating a visible change.
+    pub fn debug_busy(&self) -> bool {
+        self.bars.iter().any(|b| b.is_animating())
     }
 
     /// Current heights, 0..=1.

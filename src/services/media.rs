@@ -129,6 +129,7 @@ fn run(state: Arc<Mutex<MediaState>>, queue: Receiver<Command>, stop: Arc<Mutex<
     let mut next_poll = Instant::now();
 
     loop {
+        crate::app::dbg_spawn_log("media.rs");
         if stop.lock().map(|s| *s).unwrap_or(true) {
             return;
         }

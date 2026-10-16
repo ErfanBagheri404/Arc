@@ -163,6 +163,7 @@ fn run(
     shared: std::sync::Arc<std::sync::Mutex<Stats>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    crate::app::dbg_spawn_log("metrics.rs");
     let mut cpu = CpuCounter::open();
     let mut net = NetCounter::new();
     let disk = DiskCounter::new();

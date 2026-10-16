@@ -6,7 +6,7 @@
 //! Contract (do not change without updating `app::run`):
 //! - `new(hwnd)` once, after the window exists.
 //! - `resize(physical_w, physical_h)` whenever the island geometry changes.
-//! - `present(frame, dpi_scale, dt_seconds, body_offset_x)` exactly once per
+//! - `present(frame, dpi_scale, dt_seconds, body_offset_x, sync)` exactly once per
 //!   frame the app loop asks for; the renderer must not present on its own.
 
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    ID2D1PathGeometry, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
@@ -79,6 +79,12 @@ pub struct PerfProbe {
     pub avg_frame_ms: Option<f32>,
 }
 
+/// TEMP DEBUG: renderer-internal stage timings (acquire / draw / Present).
+pub static DBG_NODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static DBG_ACQ_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static DBG_ENDDRAW_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static DBG_RS_PRESENT_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Cache key for a DirectWrite text format. Sizes are stored as bits so two sizes
 /// 12 and 12.0000001 do not collide through float equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,6 +98,10 @@ struct FormatKey {
 /// D2D renders onto a premultiplied surface, so a brush colour must be
 /// premultiplied by its own alpha against black — which is exactly
 /// `(r*a, g*a, b*a, a)`.
+fn color_key(color: &D2D1_COLOR_F) -> [u32; 4] {
+    [color.r.to_bits(), color.g.to_bits(), color.b.to_bits(), color.a.to_bits()]
+}
+
 fn premultiply(c: Rgba) -> D2D1_COLOR_F {
     let c = c.clamped();
     D2D1_COLOR_F {
@@ -130,7 +140,7 @@ fn format_key(style: &TextStyle) -> FormatKey {
     }
 }
 
-/// The point each of the four corner segments departs from. Must mirror the
+// The point each of the four corner segments departs from.
 /// start of the matching segment in [`squircle_segments`], or the outline closes
 /// with visible kinks between corners.
 fn corner_start(rect: &Rect, radii: CornerRadii, index: usize) -> (f32, f32) {
@@ -260,6 +270,19 @@ pub struct Renderer {
     /// frames lands in the wrong resource domain. `None` is a cached *failure* —
     /// a handle that failed once must not be re-decoded every frame.
     images: HashMap<ImageHandle, Option<IWICFormatConverter>>,
+    /// Solid brushes keyed by the exact bits of the premultiplied colour. A
+    /// brush is device-dependent, not target-dependent, so one outlives every
+    /// per-frame render target the swapchain hands us. Creating one per node
+    /// per frame was the idle burn: a 40 px pill cost ~20 ms of CPU a second.
+    /// Animated fades mint new colours every frame, so the map is dropped
+    /// wholesale once it grows past `64` rather than leaking.
+    brushes: HashMap<[u32; 4], ID2D1SolidColorBrush>,
+    /// One geometry reused for every filled path in a frame. `Open` discards
+    /// the geometry's previous contents, so the outline is rebuilt into this
+    /// instead of allocating a fresh COM object for each node.
+    scratch_path: Option<ID2D1PathGeometry>,
+    /// Scratch UTF-16 buffer for text runs: cleared per draw, never reallocated.
+    scratch_utf16: Vec<u16>,
     probe: PerfProbe,
     /// True when the GPU chain could not be built (RDP, no GPU, CI). Everything
     /// except drawing still works, so the app runs and tests pass anywhere.
@@ -287,6 +310,9 @@ impl Renderer {
             formats: HashMap::new(),
             wic: None,
             images: HashMap::new(),
+            brushes: HashMap::new(),
+            scratch_path: None,
+            scratch_utf16: Vec::with_capacity(64),
             probe: PerfProbe::default(),
             degraded: true,
             dead: false,
@@ -341,6 +367,11 @@ impl Renderer {
                 Some(&mut context),
             )
         };
+        crate::app::dbg_spawn_log(&format!(
+            "D3D hw_ok={} level={}",
+            attempt.is_ok(),
+            level.0
+        ));
         if attempt.is_err() {
             device = None;
             unsafe {
@@ -360,6 +391,15 @@ impl Renderer {
         let device = device.ok_or(Error::from_thread())?;
         let dxgi: IDXGIDevice = step!("IDXGIDevice", device.cast());
         let adapter = step!("GetAdapter", unsafe { dxgi.GetAdapter() });
+        if let Ok(desc) = unsafe { adapter.GetDesc() } {
+            let name: String = desc
+                .Description
+                .iter()
+                .take_while(|c| **c != 0)
+                .map(|c| char::from_u32(*c as u32).unwrap_or('?'))
+                .collect();
+            crate::app::dbg_spawn_log(&format!("adapter {name}"));
+        }
         let factory: IDXGIFactory2 = step!("IDXGIFactory2", unsafe { adapter.GetParent() });
 
         let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -387,7 +427,7 @@ impl Renderer {
         // Explicit sRGB rather than the driver's default (risks T3).
         if let Ok(swapchain3) = swapchain.cast::<IDXGISwapChain3>() {
             let _ = unsafe { swapchain3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) };
-            let _ = unsafe { swapchain3.SetMaximumFrameLatency(1) };
+            let _ = unsafe { swapchain3.SetMaximumFrameLatency(3) };
         }
 
         let dcomp: IDCompositionDevice = step!("DCompositionCreateDevice", unsafe {
@@ -472,9 +512,15 @@ impl Renderer {
     /// a fixed frame (see `app::run`), so the morphing island is *centred* by
     /// translating the scene instead of resizing the HWND — a `SetWindowPos` +
     /// `ResizeBuffers` every animating frame is what made the expand stutter.
-    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32, offset_x: f32) {
+    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32, offset_x: f32, sync: bool) {
+        let _ = (
+            DBG_ACQ_US.load(std::sync::atomic::Ordering::Relaxed),
+            DBG_ENDDRAW_US.load(std::sync::atomic::Ordering::Relaxed),
+            DBG_RS_PRESENT_US.load(std::sync::atomic::Ordering::Relaxed),
+        );
         self.probe.presents = self.probe.presents.saturating_add(1);
         self.probe.last_node_count = frame.scene.count();
+        DBG_NODES.store(self.probe.last_node_count, std::sync::atomic::Ordering::Relaxed);
         let ms = dt.max(0.0) * 1000.0;
         self.probe.avg_frame_ms = Some(match self.probe.avg_frame_ms {
             Some(prev) => prev * 0.9 + ms * 0.1,
@@ -490,6 +536,7 @@ impl Renderer {
         else {
             return;
         };
+        let dbg_a0 = std::time::Instant::now();
         let target = match acquire_target(&d2d, &swapchain, scale) {
             Ok(pair) => pair,
             Err(error) => {
@@ -499,6 +546,11 @@ impl Renderer {
             }
         };
 
+        DBG_ACQ_US.store(
+            dbg_a0.elapsed().as_micros() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let dbg_b0 = std::time::Instant::now();
         unsafe { target.BeginDraw() };
         if offset_x != 0.0 {
             // The render target is DPI-scaled, so a translation in logical
@@ -516,7 +568,9 @@ impl Renderer {
             };
             target.Clear(Some(&transparent));
         }
-        frame.scene.walk(&mut |node| self.draw_node(&target, node));
+        if std::env::var("ARC_DBG_EMPTY").is_err() {
+            frame.scene.walk(&mut |node| self.draw_node(&target, node));
+        }
         let drawn = unsafe { target.EndDraw(None, None) };
         // Release the back buffer before presenting; see `acquire_target`.
         drop(target);
@@ -529,9 +583,22 @@ impl Renderer {
             return;
         }
 
-        // Sync interval 1: the loop already parks when idle, so a queued frame
-        // should not be dropped on the floor before it is seen.
-        let result = unsafe { swapchain.Present(1, Default::default()) };
+        // Sync interval 1 only while a spring is live: that is what keeps the
+        // morph tear-free. An idle frame (the pet's 5 Hz loop) must NOT wait for
+        // a vblank — blocking there cost ~28 ms per repaint, ~25 % of a core,
+        // for a 40 px pill nobody is interacting with. Sync 0 returns as soon as
+        // the buffer is queued, and the loop's own pacing is the frame clock.
+        let interval = u32::from(sync);
+        DBG_ENDDRAW_US.store(
+            dbg_b0.elapsed().as_micros() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let dbg_p0 = std::time::Instant::now();
+        let result = unsafe { swapchain.Present(interval, Default::default()) };
+        DBG_RS_PRESENT_US.store(
+            dbg_p0.elapsed().as_micros() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if !result.is_ok() {
             log::warn!("arc: Present failed: {result:?} (0x{:08X})", result.0);
         }
@@ -597,10 +664,7 @@ impl Renderer {
         let Some(brush) = self.brush(target, color) else {
             return;
         };
-        let Some(factory) = self.d2d_factory.clone() else {
-            return;
-        };
-        let Ok(path) = (unsafe { factory.CreatePathGeometry() }) else {
+        let Some(path) = self.scratch_geometry() else {
             return;
         };
         let Ok(sink) = (unsafe { path.Open() }) else {
@@ -621,6 +685,14 @@ impl Renderer {
         }
     }
 
+    fn scratch_geometry(&mut self) -> Option<ID2D1PathGeometry> {
+        if self.scratch_path.is_none() {
+            let factory = self.d2d_factory.clone()?;
+            self.scratch_path = (unsafe { factory.CreatePathGeometry() }).ok();
+        }
+        self.scratch_path.clone()
+    }
+
     fn fill_squircle(
         &mut self,
         target: &ID2D1RenderTarget,
@@ -634,10 +706,7 @@ impl Renderer {
         let Some(brush) = self.brush(target, color) else {
             return;
         };
-        let Some(factory) = self.d2d_factory.clone() else {
-            return;
-        };
-        let Ok(path) = (unsafe { factory.CreatePathGeometry() }) else {
+        let Some(path) = self.scratch_geometry() else {
             return;
         };
         let Ok(sink) = (unsafe { path.Open() }) else {
@@ -859,11 +928,20 @@ impl Renderer {
         };
     }
 
-    fn brush(&self, target: &ID2D1RenderTarget, color: Rgba) -> Option<ID2D1SolidColorBrush> {
+    fn brush(&mut self, target: &ID2D1RenderTarget, color: Rgba) -> Option<ID2D1SolidColorBrush> {
         let color = premultiply(color);
-        // Brushes are cheap relative to a frame, and caching by colour would need
-        // a float-keyed map for no measurable win at this node count.
-        unsafe { target.CreateSolidColorBrush(&color, None).ok() }
+        let key = color_key(&color);
+        if let Some(cached) = self.brushes.get(&key) {
+            return Some(cached.clone());
+        }
+        let brush = unsafe { target.CreateSolidColorBrush(&color, None).ok() };
+        if let Some(brush) = &brush {
+            if self.brushes.len() >= 64 {
+                self.brushes.clear();
+            }
+            self.brushes.insert(key, brush.clone());
+        }
+        brush
     }
 
     fn draw_text(&mut self, target: &ID2D1RenderTarget, rect: Rect, text: &str, style: &TextStyle) {
@@ -886,10 +964,11 @@ impl Renderer {
         // `text_format`), so a frame pays nothing for it.
         // DrawText takes a slice, so it gets the length the text actually has --
         // the NUL that wide() appends for PCWSTR is not part of it.
-        let utf16: Vec<u16> = text.encode_utf16().collect();
+        self.scratch_utf16.clear();
+        self.scratch_utf16.extend(text.encode_utf16());
         unsafe {
             target.DrawText(
-                &utf16,
+                &self.scratch_utf16,
                 &format,
                 &layout,
                 &brush,
@@ -1245,8 +1324,8 @@ mod tests {
     #[test]
     fn present_counts_frames_and_nodes() {
         let mut r = Renderer::new(NonNull::dangling()).expect("renderer");
-        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0);
-        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, true);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, true);
         assert_eq!(r.probe().presents, 2);
         assert_eq!(r.probe().last_node_count, 1);
         assert!(r.probe().avg_frame_ms.is_some());
@@ -1265,7 +1344,7 @@ mod tests {
         let mut r = Renderer::new(NonNull::dangling()).expect("renderer");
         r.resize(0, 0);
         assert_eq!((r.width, r.height), (1, 1));
-        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, true);
         assert_eq!(
             r.probe().presents,
             1,

@@ -181,7 +181,9 @@ impl Clipboard {
     }
 }
 
-fn run(entries: Arc<Mutex<Vec<Entry>>>, enabled: Arc<Mutex<bool>>) {
+fn run(
+    entries: Arc<Mutex<Vec<Entry>>>, enabled: Arc<Mutex<bool>>) {
+    crate::app::dbg_spawn_log("clipboard.rs");
     let mut last_seq = 0u32;
     loop {
         std::thread::sleep(POLL);

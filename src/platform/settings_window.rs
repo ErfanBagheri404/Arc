@@ -30,8 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetWindowLongPtrW,
     IsWindowVisible, PeekMessageW, RegisterClassExW, SetWindowLongPtrW, ShowWindow, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, MSG, PM_REMOVE, SW_HIDE, SW_SHOW, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_SIZE, WNDCLASSEXW, WS_CAPTION,
-    WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_SIZE,
+    WNDCLASSEXW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE,
 };
 
 use super::render::Renderer;
@@ -40,10 +40,17 @@ use crate::core::scene::Frame;
 /// Window class name, registered once per process.
 const CLASS_NAME: &str = "ArcSettingsWindow";
 
+/// Wheel notches per scroll step — the unit `WM_MOUSEWHEEL` reports in.
+pub const WHEEL_DELTA: i32 = 120;
+/// Logical px a wheel notch travels. A notch is a small flick, not a page.
+pub const SCROLL_STEP: f32 = 32.0;
+
 /// Logical client size, in DIPs. The content is laid out for exactly this, so
-/// the window keeps a fixed size and there is no reflow to get wrong.
+/// the window keeps a fixed size and there is no reflow to get wrong. It is
+/// tall enough that most of the sheet is visible; the pet gallery scrolls
+/// inside its own viewport.
 pub const LOGICAL_W: f32 = 460.0;
-pub const LOGICAL_H: f32 = 150.0;
+pub const LOGICAL_H: f32 = 560.0;
 
 /// Client size in physical px for a given DPI scale.
 fn client_px(scale: f32) -> (i32, i32) {
@@ -89,11 +96,14 @@ fn window_px(scale: f32) -> (i32, i32) {
     )
 }
 
-/// Events the window hands to `app` after each pump.
+/// Events the app hands to `app` after each pump.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsEvent {
     /// A click inside the client area, in client-space physical px.
     Click { x: i32, y: i32 },
+    /// A wheel notch. Positive scrolls up (content moves down), the sign
+    /// Windows' `WM_MOUSEWHEEL` carries; the app converts it to logical px.
+    Scroll { delta: i32 },
     /// The window was closed. Hidden, not destroyed: reopening is instant and
     /// the renderer never has to rebuild its chain.
     Closed,
@@ -202,6 +212,18 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 SettingsEvent::Click {
                     x: (lparam.0 & 0xFFFF) as i32,
                     y: ((lparam.0 >> 16) & 0xFFFF) as i32,
+                },
+            );
+            LRESULT(0)
+        }
+        // The pet gallery is longer than the window, so the sheet scrolls.
+        // `wparam`'s high word is the notch count, signed; the low word is the
+        // virtual key state, which the sheet has no use for.
+        WM_MOUSEWHEEL => {
+            push_event(
+                hwnd,
+                SettingsEvent::Scroll {
+                    delta: ((wparam.0 >> 16) as i16) as i32,
                 },
             );
             LRESULT(0)
@@ -368,7 +390,7 @@ impl SettingsWindow {
         let (w, h) = self.state.physical;
         self.renderer.resize(w.max(1), h.max(1));
         let scale = self.state.scale;
-        self.renderer.present(frame, scale, 0.0, 0.0);
+        self.renderer.present(frame, scale, 0.0, 0.0, true);
     }
 
     /// Bring a hidden window back, re-reading its live metrics first.
@@ -421,14 +443,14 @@ mod tests {
     #[test]
     fn logical_size_is_the_layout_contract() {
         assert_eq!(LOGICAL_W, 460.0);
-        assert_eq!(LOGICAL_H, 150.0);
+        assert_eq!(LOGICAL_H, 560.0);
     }
 
     #[test]
     fn client_px_scales_with_dpi() {
-        assert_eq!(client_px(1.0), (460, 150));
+        assert_eq!(client_px(1.0), (460, 560));
         // 125 %, the user's display: the client area must grow, not the padding.
-        assert_eq!(client_px(1.25), (575, 188));
+        assert_eq!(client_px(1.25), (575, 700));
     }
 
     /// `CreateWindowExW` is handed the OUTER size, so the client size must never
