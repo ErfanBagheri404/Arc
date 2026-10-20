@@ -34,9 +34,21 @@ pub enum WindowMode {
     Hidden,
     /// Collapsed pill.
     Collapsed,
+    /// The hover state: the minininized pill grown into a fuller pill.
+    Peek,
     /// Expanded panel.
     Expanded,
 }
+
+/// Peek geometry: the pill grown on hover. Same hanging-pill silhouette, a
+/// little taller and much wider so the resting glyph slot gains the room the
+/// now-playing row and the standing rows want. Height stays pill-domain, so
+/// `openness` (which takes the slower axis) never crosses the panel's
+/// fade-in threshold — the panel keeps quiet until a press.
+pub const PEEK_W: f32 = 320.0;
+pub const PEEK_H: f32 = 44.0;
+/// `h / 2`: the peek keeps the true semicircular bottom.
+pub const PEEK_RADIUS: f32 = PEEK_H / 2.0;
 
 /// Island geometry + morph springs.
 pub struct IslandState {
@@ -154,6 +166,7 @@ impl IslandState {
         let expanding = self.mode == WindowMode::Expanded;
         let (w, h, r) = match self.mode {
             WindowMode::Expanded => (PANEL_W, PANEL_H, PANEL_RADIUS),
+            WindowMode::Peek => (PEEK_W, PEEK_H, PEEK_RADIUS),
             // `Hidden` keeps the pill's target: the window is hidden while the
             // springs settle, so when it comes back there is no jump.
             WindowMode::Collapsed | WindowMode::Hidden => (PILL_W, PILL_H, PILL_RADIUS),
@@ -164,8 +177,8 @@ impl IslandState {
             self.height.set_config(SpringConfig::OPEN);
             self.radius.set_config(SpringConfig::GENERIC);
         } else {
-            // Collapse: faster and critically damped (no overshoot on the way
-            // out), about 2/3 of the expand duration.
+            // Collapse into the smaller state including a peek shrink: fast
+            // and critically damped, no overshoot, ~2/3 of the expand time.
             self.width.set_config(SpringConfig::new(0.20, 1.0));
             self.height.set_config(SpringConfig::new(0.13, 1.0));
             self.radius.set_config(SpringConfig::new(0.22, 1.0));
@@ -237,9 +250,11 @@ impl IslandState {
     /// Fold the cursor's presence into the mode machine. Returns `true` when
     /// the mode changed this call (caller needs a repaint).
     ///
-    /// Hover never opens the island — the pill is the hover state, the panel
-    /// is a press. Leaving the body therefore collapses a click/hotkey-opened
-    /// panel; an auto-expanded (playback) panel stays until playback stops.
+    /// Three-way ladder, the user's explicit model: minimized pill is the rest
+    /// state, hover grows it into the peek pill, a press opens the panel.
+    /// Hover therefore never reaches [`WindowMode::Expanded`]. Leaving the
+    /// body folds whatever is open; an auto-expanded (playback) panel stays
+    /// until playback stops.
     pub fn hover_step(&mut self, pointer_over: bool) -> bool {
         // Hidden for a fullscreen app: hover must not pull the island back
         // over the video the user is watching.
@@ -247,7 +262,21 @@ impl IslandState {
             return false;
         }
 
+        // The panel folds when the cursor leaves, however it was opened
+        // (click, hotkey). Playback keeps it.
         if self.mode == WindowMode::Expanded && !pointer_over && !self.auto_expanded {
+            self.mode = WindowMode::Collapsed;
+            self.retarget();
+            return true;
+        }
+
+        // Peek tracks the cursor: over the pill it grows, away it shrinks.
+        if self.mode == WindowMode::Collapsed && pointer_over {
+            self.mode = WindowMode::Peek;
+            self.retarget();
+            return true;
+        }
+        if self.mode == WindowMode::Peek && !pointer_over {
             self.mode = WindowMode::Collapsed;
             self.retarget();
             return true;
@@ -454,29 +483,34 @@ mod tests {
     }
 
     #[test]
-    fn hover_never_opens_the_island_and_leaving_collapses() {
+    fn hover_peeks_the_pill_and_leaving_folds_it_back() {
         let mut s = IslandState::collapsed();
-        // Hovering is not an opening gesture: however long the cursor rests on
-        // the pill, it stays a pill. Only a press opens the panel.
+        // Hover grows the minimized pill into the peek pill — and stops there.
+        assert!(s.hover_step(true));
+        assert_eq!(s.mode(), WindowMode::Peek);
+        // Settled: it stays a pill, never the panel.
         for _ in 0..50 {
             assert!(!s.hover_step(true));
         }
-        assert_eq!(s.mode(), WindowMode::Collapsed);
+        assert_eq!(s.mode(), WindowMode::Peek);
         assert!(!s.expanded());
+        assert!(s.logical_width() <= PEEK_W + 0.5);
 
-        // Press it, then leave the body: the panel folds itself back to the
-        // pill.
-        s.toggle();
-        assert!(s.expanded());
+        // Away from it → back to the minimized pill.
         assert!(s.hover_step(false));
         assert_eq!(s.mode(), WindowMode::Collapsed);
         assert!(!s.expanded());
 
-        // ... while the cursor on the body keeps it open.
-        let mut k = IslandState::collapsed();
-        k.toggle();
-        assert!(!k.hover_step(true));
-        assert!(k.expanded());
+        // Press the pill: that is the panel.
+        s.hover_step(true);
+        s.toggle();
+        assert!(s.expanded());
+        // The panel stays under the cursor.
+        assert!(!s.hover_step(true));
+        assert!(s.expanded());
+        // Cursor leaves → all the way back to the minimized pill.
+        assert!(s.hover_step(false));
+        assert_eq!(s.mode(), WindowMode::Collapsed);
     }
 
     #[test]
@@ -505,12 +539,12 @@ mod tests {
         // there until the user finds the tray icon.
         assert!(s.hover_step(false));
         assert!(!s.expanded());
-        // Returning to the body must NOT reopen it: hover is not an opening
-        // gesture any more.
+        // Returning to the body peeks the pill but must NOT reopen the panel.
+        assert!(s.hover_step(true));
         for _ in 0..10 {
             assert!(!s.hover_step(true));
         }
-        assert!(!s.expanded());
+        assert_eq!(s.mode(), WindowMode::Peek);
     }
 
     #[test]
