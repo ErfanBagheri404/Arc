@@ -1150,13 +1150,17 @@ fn tab_strip(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
             // (`Cale…` for two frames) instead of wiping it open.
             let label_w = measure(label, &TAB_LABEL);
             let inset = (1.0 - open) * TAB_ICON_GAP;
+            // Center the glyph box in the TAB_H row, exactly as the icon is:
+            // a rect starting at `y` seats the cap height against the strip's
+            // top edge, so the label reads high inside its fill pill.
+            let ty = y + (TAB_H - line_height(&TAB_LABEL)) / 2.0;
             out.push(Node::Text {
                 rect: put(
                     fw,
                     fh,
                     Rect::new(
                         left + TAB_PAD + (TAB_ICON + TAB_ICON_GAP - inset) * open,
-                        y,
+                        ty,
                         label_w + TAB_SLACK,
                         line_height(&TAB_LABEL),
                     ),
@@ -2253,6 +2257,18 @@ mod tests {
             "{:?} vs {want_left}",
             rects[0]
         );
+    }
+
+    #[test]
+    fn tab_label_is_vertically_centered_in_the_tab_box() {
+        let f = panel();
+        let (rect, _) = find_text(&f, "Media").expect("selected tab label");
+        let lh = line_height(&TAB_LABEL);
+        // The strip row is TAB_H tall; the label box must sit in its middle,
+        // the same way the icon does (`y + (TAB_H - TAB_ICON) / 2`).
+        let want = dock_top(PANEL_H_REF) + (TAB_H - lh) / 2.0;
+        assert!((rect.y - want).abs() < 1e-3, "label y {} vs {want}", rect.y);
+        assert!((rect.h - lh).abs() < 1e-3, "label height {} vs {lh}", rect.h);
     }
 
     #[test]
