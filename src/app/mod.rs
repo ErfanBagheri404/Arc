@@ -1000,8 +1000,8 @@ pub fn run() -> std::process::ExitCode {
 
         // Hover is polled, not event-driven (the collapsed window is
         // click-through), so it has to be stepped even on frames where nothing
-        // else woke us up.
-        let hover_changed = state.hover_step(overlay.pointer_over(), dt.as_secs_f32());
+        // else woke us up. It only ever folds a panel whose cursor left.
+        let hover_changed = state.hover_step(overlay.pointer_over());
         // The tab swap runs its own springs; while either is live the island
         // repaints so the crossfade/rise plays out.
         let swap_busy = view.tab_swap.step(dt.as_secs_f32());

@@ -16,71 +16,6 @@ pub const PILL_RADIUS: f32 = 16.0;
 pub const PANEL_RADIUS: f32 = 36.0;
 pub const PANEL_H: f32 = 248.0;
 
-/// Dwell time before hover expands the island, in seconds (Phase 2, hover).
-/// Short enough to feel like a reaction, long enough not to fire on a mouse
-/// crossing the top edge while scrolling.
-pub const HOVER_DWELL: f32 = 0.08;
-
-/// Pure hover-dwell state machine. Owns *when* hover asks for expansion;
-/// [`IslandState`] owns the resulting geometry springs.
-///
-/// Separate from the springs on purpose: dwell timing must stay testable without
-/// integrating a spring, and the springs must stay testable without a clock.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Hover {
-    /// Cursor is currently over the island.
-    inside: bool,
-    /// Expanded because of hover (as opposed to hotkey or click).
-    expanded_by_hover: bool,
-    /// Seconds the cursor has been inside, accumulated by the caller.
-    dwell: f32,
-}
-
-impl Hover {
-    pub const fn new() -> Self {
-        Self {
-            inside: false,
-            expanded_by_hover: false,
-            dwell: 0.0,
-        }
-    }
-
-    /// Feed the current pointer state each frame. Returns `true` when the
-    /// dwell threshold has just been crossed (one edge, so the caller can
-    /// consume it as a discrete event).
-    pub fn update(&mut self, inside: bool, dt: f32) -> bool {
-        if inside {
-            if !self.inside {
-                // Re-entering restarts the clock: the dwell must be earned
-                // without interruption, not banked across a trip outside.
-                self.dwell = 0.0;
-            }
-            self.inside = true;
-            self.dwell += dt.max(0.0);
-        } else {
-            self.inside = false;
-            self.dwell = 0.0;
-        }
-        self.dwell >= HOVER_DWELL && !self.expanded_by_hover
-    }
-
-    /// The hover-expanded state, latched until [`Self::leave_expansion`].
-    pub fn expanded(&self) -> bool {
-        self.expanded_by_hover
-    }
-
-    /// Latch the hover expansion.
-    pub fn enter_expansion(&mut self) {
-        self.expanded_by_hover = true;
-    }
-
-    /// Unlatch, e.g. because the user toggled the panel closed by hand.
-    pub fn leave_expansion(&mut self) {
-        self.expanded_by_hover = false;
-        self.dwell = 0.0;
-    }
-}
-
 /// Who currently owns the island's visibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UserVis {
@@ -114,7 +49,6 @@ pub struct IslandState {
     width: Spring,
     height: Spring,
     radius: Spring,
-    hover: Hover,
     /// Opened automatically by a playback start; survives cursor-leave and
     /// collapses again when playback stops. Cleared on any explicit user action.
     auto_expanded: bool,
@@ -129,7 +63,6 @@ impl IslandState {
             width: Spring::new(PILL_W, SpringConfig::OPEN),
             height: Spring::new(PILL_H, SpringConfig::OPEN),
             radius: Spring::new(PILL_RADIUS, SpringConfig::GENERIC),
-            hover: Hover::new(),
             auto_expanded: false,
         }
     }
@@ -301,47 +234,25 @@ impl IslandState {
         }
     }
 
-    /// True while expanded *by hover*, which collapses again the moment
-    /// the cursor leaves.
-    #[allow(dead_code)]
-    pub fn expanded_by_hover(&self) -> bool {
-        self.hover.expanded()
-    }
-
-    /// Fold hover state into the mode machine. Returns `true` when the
-    /// mode changed this call (caller needs a repaint).
+    /// Fold the cursor's presence into the mode machine. Returns `true` when
+    /// the mode changed this call (caller needs a repaint).
     ///
-    /// `pointer_over` is window-relative hit-testing, done by the caller
-    /// from live cursor coordinates: while collapsed the window is
-    /// click-through, so `WM_MOUSEMOVE` never arrives — only polling
-    /// sees the pointer.
-    pub fn hover_step(&mut self, pointer_over: bool, dt: f32) -> bool {
+    /// Hover never opens the island — the pill is the hover state, the panel
+    /// is a press. Leaving the body therefore collapses a click/hotkey-opened
+    /// panel; an auto-expanded (playback) panel stays until playback stops.
+    pub fn hover_step(&mut self, pointer_over: bool) -> bool {
         // Hidden for a fullscreen app: hover must not pull the island back
         // over the video the user is watching.
         if self.mode == WindowMode::Hidden {
-            self.hover.leave_expansion();
             return false;
         }
 
-        // Expanded is expanded, however it got there (hover, click, hotkey):
-        // cursor off the body → collapse. This was the stuck-panel bug — a
-        // click-opened panel was exempt and only the tray could close it.
-        // Exception: an auto-expanded (playback) panel stays open even when
-        // the cursor leaves; it collapses again when playback stops.
         if self.mode == WindowMode::Expanded && !pointer_over && !self.auto_expanded {
-            self.hover.leave_expansion();
             self.mode = WindowMode::Collapsed;
             self.retarget();
             return true;
         }
-
-        let was_expanded = self.expanded();
-        if self.hover.update(pointer_over, dt) {
-            self.hover.enter_expansion();
-            self.mode = WindowMode::Expanded;
-            self.retarget();
-        }
-        self.expanded() != was_expanded
+        false
     }
 
     pub fn logical_width(&self) -> f32 {
@@ -543,25 +454,29 @@ mod tests {
     }
 
     #[test]
-    fn hover_dwell_expands_and_leaving_collapses() {
+    fn hover_never_opens_the_island_and_leaving_collapses() {
         let mut s = IslandState::collapsed();
-        // Below the dwell threshold nothing happens.
-        for _ in 0..5 {
-            assert!(!s.hover_step(true, HOVER_DWELL / 10.0));
+        // Hovering is not an opening gesture: however long the cursor rests on
+        // the pill, it stays a pill. Only a press opens the panel.
+        for _ in 0..50 {
+            assert!(!s.hover_step(true));
         }
         assert_eq!(s.mode(), WindowMode::Collapsed);
+        assert!(!s.expanded());
 
-        // Crossing it expands, and the change is reported once.
-        assert!(s.hover_step(true, HOVER_DWELL + 0.02));
-        assert_eq!(s.mode(), WindowMode::Expanded);
-        assert!(s.expanded_by_hover());
-        // ... and only once: dwelling longer must not re-fire.
-        assert!(!s.hover_step(true, 0.10));
-
-        // Cursor leaves → collapse.
-        assert!(s.hover_step(false, 0.016));
+        // Press it, then leave the body: the panel folds itself back to the
+        // pill.
+        s.toggle();
+        assert!(s.expanded());
+        assert!(s.hover_step(false));
         assert_eq!(s.mode(), WindowMode::Collapsed);
-        assert!(!s.expanded_by_hover());
+        assert!(!s.expanded());
+
+        // ... while the cursor on the body keeps it open.
+        let mut k = IslandState::collapsed();
+        k.toggle();
+        assert!(!k.hover_step(true));
+        assert!(k.expanded());
     }
 
     #[test]
@@ -569,31 +484,15 @@ mod tests {
         let mut s = IslandState::collapsed();
         s.toggle(); // opened by click/hotkey, not by hover
         assert!(s.expanded());
-        assert!(!s.expanded_by_hover());
         // Cursor sits elsewhere: one step later the panel must fold itself,
         // with no tray click.
-        assert!(s.hover_step(false, 0.016));
+        assert!(s.hover_step(false));
         assert_eq!(s.mode(), WindowMode::Collapsed);
         // ... while the cursor on the body keeps it open.
         let mut k = IslandState::collapsed();
         k.toggle();
-        assert!(!k.hover_step(true, 0.016));
+        assert!(!k.hover_step(true));
         assert!(k.expanded());
-    }
-
-    #[test]
-    fn hover_dwell_restarts_after_leaving() {
-        let mut s = IslandState::collapsed();
-        // Each visit below the dwell threshold, then leave: the dwell is never
-        // banked across trips outside.
-        for _ in 0..2 {
-            s.hover_step(true, HOVER_DWELL / 2.0);
-            s.hover_step(false, 0.016);
-        }
-        assert_eq!(s.mode(), WindowMode::Collapsed);
-        // An uninterrupted visit does fire.
-        s.hover_step(true, HOVER_DWELL + 0.02);
-        assert_eq!(s.mode(), WindowMode::Expanded);
     }
 
     #[test]
@@ -601,52 +500,26 @@ mod tests {
         let mut s = IslandState::collapsed();
         s.toggle();
         assert!(s.expanded());
-        // Cursor off the panel → it folds. Whatever opened it (hotkey, click,
-        // hover), a panel never outlives the cursor's presence — otherwise it
-        // sits there until the user finds the tray icon.
-        assert!(s.hover_step(false, 0.05));
+        // Cursor off the panel → it folds. Whatever opened it (hotkey, click),
+        // a panel never outlives the cursor's presence — otherwise it sits
+        // there until the user finds the tray icon.
+        assert!(s.hover_step(false));
         assert!(!s.expanded());
-        // Dwell must not re-expand it while the cursor is away.
+        // Returning to the body must NOT reopen it: hover is not an opening
+        // gesture any more.
         for _ in 0..10 {
-            assert!(!s.hover_step(false, 0.05));
+            assert!(!s.hover_step(true));
         }
         assert!(!s.expanded());
-    }
-
-    #[test]
-    fn dwell_does_not_fight_an_open_panel_under_the_cursor() {
-        let mut s = IslandState::collapsed();
-        s.toggle();
-        // Cursor stays on the body: the panel remains open and no collapse is
-        // reported, so the morph is never driven backwards by hover bookkeeping.
-        for _ in 0..10 {
-            assert!(!s.hover_step(true, 0.05));
-        }
-        assert!(s.expanded());
-    }
-
-    #[test]
-    fn dwell_machine_is_pure_of_springs() {
-        let mut h = Hover::new();
-        assert!(!h.expanded());
-        // `HOVER_DWELL` exactly is the threshold and must fire (>= not >).
-        assert!(!h.update(true, HOVER_DWELL - 0.01));
-        assert!(h.update(true, 0.02));
-        h.enter_expansion();
-        assert!(h.expanded());
-        // Latched: further dwell cannot re-fire.
-        assert!(!h.update(true, 10.0));
-        h.leave_expansion();
-        assert!(!h.expanded());
     }
 
     #[test]
     fn hover_is_suppressed_while_hidden() {
         let mut s = IslandState::collapsed();
         s.hide();
-        // Dwell while fullscreen-hid must not open the panel on restore.
+        // Hover while fullscreen-hid must not open the panel on restore.
         for _ in 0..20 {
-            s.hover_step(true, 0.05);
+            s.hover_step(true);
         }
         assert!(s.hidden(), "hover must not un-hide the island");
     }
@@ -659,7 +532,7 @@ mod tests {
         assert!(s.auto_expanded());
         // While auto-expanded, the cursor leaving the body must not collapse it.
         for _ in 0..20 {
-            s.hover_step(false, 0.05);
+            s.hover_step(false);
         }
         assert!(s.expanded(), "an auto-opened panel survives a cursor-leave");
         assert!(s.close_after_playback(), "playback ending must close it again");
