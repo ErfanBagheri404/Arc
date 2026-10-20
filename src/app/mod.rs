@@ -90,6 +90,12 @@ fn apply_settings_action(
             view.clip_enabled = next;
             None
         }
+        ui::settings::Action::AccentProgressToggle => {
+            let next = !view.accent_progress;
+            settings::set_bool(&mut t, "accent_progress", next);
+            view.accent_progress = next;
+            None
+        }
         ui::settings::Action::PetScaleDown | ui::settings::Action::PetScaleUp => {
             let up = matches!(action, ui::settings::Action::PetScaleUp);
             let step = ui::settings::SCALE_STEP * if up { 1.0 } else { -1.0 };
@@ -130,6 +136,7 @@ fn settings_model(
         equipped,
         notch_bg: view.notch_bg,
         clip_on,
+        accent_progress: view.accent_progress,
         pet_scale: settings::get_f64(&settings::load(), "pet_scale", 1.0),
         gallery: Some(gallery),
         scroll,
@@ -428,6 +435,7 @@ pub fn run() -> std::process::ExitCode {
     let mut last_power = Instant::now() - POWER_POLL;
     let mut last_net = Instant::now() - NET_POLL;
     let mut last_net_state: Option<NetState> = None;
+    let mut next_notif = Instant::now();
     let mut last_focus: Option<bool> = None;
     let mut last_brightness: Option<u8> = None;
     // drives: outer None = first reading, inner None = nothing plugged in
@@ -475,6 +483,7 @@ pub fn run() -> std::process::ExitCode {
     view.pet_on = pet_on;
     view.notch_bg = notch_bg_from(&boot);
     view.pet_zoom = (ui::settings::scale_snapped(settings::get_f64(&boot, "pet_scale", 1.0)) - 1.0) as f32;
+    view.accent_progress = settings::get_bool(&boot, "accent_progress", false);
     // The gallery lives in the pet service's worker; asking for a snapshot at
     // boot starts the manifest fetch, so the sheet has tiles to show the first
     // time the user opens it instead of an empty "Loading…".
@@ -507,8 +516,9 @@ pub fn run() -> std::process::ExitCode {
         // clicks are hit-tested against it.
         view.island_width = state.logical_width();
         view.island_height = state.logical_height();
-        // The pressable/hoverable region follows the morphing body inside the
-        // fixed frame, so it can never disagree with what is drawn.
+        // The header pin mirrors the island's pinned/hidden user-vis state so
+        // the corner icon and the Ctrl+Shift+Z hotkey can never disagree.
+        view.pinned = state.user_vis() == crate::app::state::UserVis::Pinned;
         overlay.set_body(
             state.logical_width(),
             state.logical_height(),
@@ -526,6 +536,17 @@ pub fn run() -> std::process::ExitCode {
                 }
                 // A file dropped on the island pins to the shelf.
                 Event::FilesDropped { paths } => {
+                    // NotchDrop's gesture: the notch answers the drop by
+                    // opening on the Shelf so the user sees where the file
+                    // went, instead of a file silently vanishing into a tab
+                    // they were not looking at.
+                    if state.open_for_drop() {
+                        dbg_reason(2);
+                        redraw = true;
+                    }
+                    if !paths.is_empty() {
+                        view.select_tab(ui::SHELF_TAB);
+                    }
                     for p in paths {
                         if shelf.pin(std::path::Path::new(&p)) {
                             dbg_reason(2);
@@ -557,7 +578,29 @@ pub fn run() -> std::process::ExitCode {
                         dbg_reason(3);
                         redraw = true;
                     }
-                    if let Some(cmd) = view.media_command(lx, ly) {
+                    // The tab strip is checked FIRST, above every content
+                    // hit. Content controls may be drawn close to the strip;
+                    // letting them win meant a content hit swallowed the
+                    // click and the island refused to leave the tab.
+                    if view.click_tab(lx, ly).is_some() {
+                        dbg_reason(10);
+                        redraw = true;
+                    } else if let Some(corner) = view.corner_at(lx, ly) {
+                        match corner {
+                            ui::CornerIcon::Settings => {
+                                // Same path as the tray item: raise the flag,
+                                // let the app loop own window creation.
+                                crate::platform::settings_window::request_open();
+                                dbg_reason(16);
+                                redraw = true;
+                            }
+                            ui::CornerIcon::Pin => {
+                                state.toggle_visibility();
+                                dbg_reason(17);
+                                redraw = true;
+                            }
+                        }
+                    } else if let Some(cmd) = view.media_command(lx, ly) {
                         media.send(cmd);
                         dbg_reason(4);
                         redraw = true;
@@ -587,6 +630,23 @@ pub fn run() -> std::process::ExitCode {
                             clip.clear();
                         } else if let Some(entry) = view.clip_entries.get(hit - 1) {
                             let _ = Clipboard::restore(&entry.text.clone());
+                        }
+                        // VNotch's copy surface: confirm the restore with a
+                        // transient pill toast so the gesture is visible.
+                        if clip.enabled() && hit > 0 {
+                            hud.arm(
+                                hud::Hud::Notification {
+                                    app: "Clipboard".into(),
+                                    title: "Copied".into(),
+                                    body: view
+                                        .clip_entries
+                                        .get(hit - 1)
+                                        .map(|e| e.text.clone())
+                                        .unwrap_or_default(),
+                                },
+                                std::time::Instant::now(),
+                            );
+                            view.hud = hud.current();
                         }
                         dbg_reason(6);
                         redraw = true;
@@ -621,9 +681,6 @@ pub fn run() -> std::process::ExitCode {
                             }
                         }
                         dbg_reason(8);
-                        redraw = true;
-                    } else if view.click_tab(lx, ly).is_some() {
-                        dbg_reason(10);
                         redraw = true;
                     }
                 }
@@ -691,8 +748,35 @@ pub fn run() -> std::process::ExitCode {
         }
         // Pull the latest snapshot every iteration. The worker publishes at 1 Hz,
         // so this is a mutex read, not a COM call.
-        let snapshot = media.snapshot();
+        // A probe switch for the playback visuals: the app renders as if a
+        // track is playing (placeholder art + fake title), so the pill row and
+        // the auto-expand can be verified without a live media session.
+        let snapshot = if std::env::var("ARC_DEMO_MEDIA").ok().as_deref() == Some("1") {
+            let mut m = crate::services::media::MediaState::default();
+            m.title = "Late Night Drive".into();
+            m.artist = "Example Artist".into();
+            m.source = "Demo".into();
+            m.playing = true;
+            m.position = std::time::Duration::from_secs(85);
+            m.duration = Some(std::time::Duration::from_secs(210));
+            m
+        } else {
+            media.snapshot()
+        };
         if snapshot != view.media {
+            // Playback policy (MusicNotch / Boring Notch behaviour): a track
+            // starting opens the island, and playback ending closes it again —
+            // but only if WE opened it, never a user-opened panel.
+            let (was, now_playing) = (view.media.playing, snapshot.playing);
+            if !was && now_playing {
+                if std::env::var("ARC_DEMO_MEDIA_NOEXPAND").ok().as_deref() != Some("1")
+                    && state.open_for_playback()
+                {
+                    dbg_reason(18);
+                }
+            } else if was && !now_playing && state.close_after_playback() {
+                dbg_reason(19);
+            }
             view.media = snapshot;
             dbg_reason(15);
             redraw = true;
@@ -735,6 +819,24 @@ pub fn run() -> std::process::ExitCode {
         if hud.step(now) {
             view.hud = None;
             dbg_reason(18);
+            redraw = true;
+        }
+        // Notification-banner probe: `ARC_DEMO_NOTIFY=1` fires a toast every
+        // 5 s so the two-line banner can be verified without a real listener.
+        if std::env::var("ARC_DEMO_NOTIFY").ok().as_deref() == Some("1")
+            && now >= next_notif
+        {
+            next_notif = now + std::time::Duration::from_secs(5);
+            hud.arm(
+                hud::Hud::Notification {
+                    app: "Outlook".into(),
+                    title: "Design review".into(),
+                    body: "Arc notch dock is ready for review".into(),
+                },
+                now,
+            );
+            view.hud = hud.current();
+            dbg_reason(20);
             redraw = true;
         }
         if now.duration_since(last_power) >= POWER_POLL {

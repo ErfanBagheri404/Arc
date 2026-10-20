@@ -90,6 +90,7 @@ pub enum Action {
     Remove(String),
     NotchColor(usize),
     ClipToggle,
+    AccentProgressToggle,
     PetScaleDown,
     PetScaleUp,
 }
@@ -104,6 +105,8 @@ pub struct Model {
     pub equipped: Option<String>,
     pub notch_bg: Rgba,
     pub clip_on: bool,
+    /// Spotify skin: progress fill tinted with the album-art accent.
+    pub accent_progress: bool,
     pub pet_scale: f64,
     pub gallery: Option<GallerySnapshot>,
     pub scroll: f32,
@@ -293,6 +296,13 @@ pub fn sheet(fw: f32, fh: f32, model: &Model) -> Sheet {
         nodes.push(toggle_if(&ctx, r, model.clip_on));
         hits.push((ctx.hit(r), Action::ClipToggle));
     }
+    {
+        let r = Rect::new(PANEL_PAD, y, fw - PANEL_PAD * 2.0, ROW_H);
+        y += ROW_H + ROW_GAP;
+        nodes.extend(row(&ctx, r, "Accent progress bar", 36.0 + 10.0));
+        nodes.push(toggle_if(&ctx, r, model.accent_progress));
+        hits.push((ctx.hit(r), Action::AccentProgressToggle));
+    }
 
     let content_h = y + 8.0;
     Sheet { nodes, hits, content_h }
@@ -437,6 +447,7 @@ mod tests {
             equipped: Some("Nukey".to_string()),
             notch_bg: NOTCH_SWATCHES[1],
             clip_on: false,
+            accent_progress: false,
             pet_scale: 1.0,
             gallery: None,
             scroll: 0.0,

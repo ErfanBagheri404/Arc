@@ -44,6 +44,13 @@ pub enum Hud {
     Brightness(u8),
     /// A removable drive appeared (`Some(label)`) or was unplugged (`None`).
     Drive(Option<String>),
+    /// A notification banner (NotchStar/TopNotch's toast): the app name, the
+    /// title, and the body. Wider than a gauge HUD, two lines, no fraction.
+    Notification {
+        app: String,
+        title: String,
+        body: String,
+    },
 }
 
 /// Battery/AC state, straight from `GetSystemPowerStatus`.

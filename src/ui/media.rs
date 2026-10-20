@@ -18,18 +18,23 @@ use crate::ui::{line_height, measure};
 /// Album art edge in logical pixels (reference: `64`).
 pub const ART: f32 = 64.0;
 /// Gap between the art square and the text column.
-const ART_GAP: f32 = 14.0;
+const ART_GAP: f32 = 18.0;
 /// Play/pause glyph size.
 const TRANSPORT: f32 = 22.0;
-/// Gap between transport buttons.
-const TRANSPORT_GAP: f32 = 22.0;
+/// Gap between transport buttons. NotchStar spaces its three transport glyphs
+/// 85–86 px apart on a 1022 px panel (≈0.084 of panel width); at Arc's 640 that
+/// is a 53 px pitch, so the gap is 53 − 22 = 31.
+const TRANSPORT_GAP: f32 = 31.0;
 /// Radius used for the progress track.
 const BAR_RADIUS: f32 = 3.0;
 /// Leading between the media column's stacked rows (title → subtitle, and each
 /// row → the next). Half a small line box, rounded: 8 px separates glyph ink
 /// where the old 2 px stacked ascenders on descenders (`Dorcci…` touching its
 /// subtitle).
-const TEXT_LEAD: f32 = 8.0;
+const TEXT_LEAD: f32 = 18.0;
+/// Gap between the progress row and the transport buttons. Larger than
+/// `TEXT_LEAD`: the buttons are a distinct block, not another text line.
+const TRANSPORT_LEAD: f32 = 16.0;
 /// Gap between a clock label and the bar on the shared progress row.
 const BAR_SIDE_GAP: f32 = 10.0;
 /// Dim colour for disabled transport buttons (shuffle/repeat).
@@ -57,7 +62,7 @@ fn fmt(d: std::time::Duration) -> String {
 }
 
 /// The media content block, laid out under `top` (the tab strip's bottom).
-pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
+pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState, accent_progress: bool) -> Vec<Node> {
     if !state.has_session() {
         return empty(fw, fh);
     }
@@ -91,7 +96,13 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
         style: title_style,
     });
 
-    let sub_style = TextStyle::subtitle(accent);
+    // The reference's artist line is grey, not accent-tinted: a red/pink
+    // subtitle read as an error state, and the accent is already carried by the
+    // progress fill. Accent belongs to ONE element per surface.
+    let sub_style = TextStyle {
+        color: Rgba::rgba(1.0, 1.0, 1.0, 0.62),
+        ..TextStyle::subtitle(accent)
+    };
     // Leading is half a line box, not 2 px: a title on its line box leaves glyph
     // ink a couple of px past the box bottom, so a 2 px gap stacked the
     // subtitle's ascenders straight onto the title's descenders.
@@ -120,29 +131,28 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
         style: clock_style.clone(),
     });
     // Hug the right padding: the SLOT is fixed (so the bar never shifts), and
-    // the text is left-aligned inside it, so shrink the rect to the glyphs'
-    // width and anchor it to the slot's right edge.
-    let remain_w = measure(&remain, &clock_style);
+    // the label is right-aligned INSIDE it. Sizing the box from `measure()` was
+    // the bug: the UI measures with an approximation while DirectWrite advances
+    // the real glyphs, so a label measured a hair too narrow got trimmed to
+    // `−3:....`. The slot is always wider than the string, and a trailing
+    // alignment keeps the digits flush to the padding whatever they measure.
     out.push(Node::Text {
-        rect: put(
-            fw,
-            fh,
-            Rect::new(
-                remain_slot.max_x() - remain_w.min(remain_slot.w),
-                remain_slot.y,
-                remain_w.min(remain_slot.w),
-                remain_slot.h,
-            ),
-        ),
+        rect: put(fw, fh, remain_slot),
         text: remain,
-        style: clock_style,
+        style: TextStyle {
+            align: Align::End,
+            ..clock_style
+        },
     });
 
     out.push(Node::Bar {
         rect: put(fw, fh, bar_r),
         progress,
-        track: Rgba::rgba(1.0, 1.0, 1.0, 0.12),
-        fill: accent,
+        // NotchStar's bar is monochrome: #4A4A4E track with a WHITE fill. The
+        // Spotify skin (opt-in) tints the fill with the album-art accent, which
+        // has no place on the progress bar otherwise.
+        track: Rgba::rgba(0.29, 0.29, 0.31, 1.0),
+        fill: if accent_progress { accent } else { Rgba::WHITE },
         radii: CornerRadii::uniform(BAR_RADIUS),
     });
 
@@ -170,15 +180,25 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState) -> Vec<Node> {
     out
 }
 
+/// The media block's real column: art row + one progress row + transport.
+/// Centring used to assume a taller estimate than this, which pushed the
+/// transport row past the footer.
+fn media_body_h() -> f32 {
+    let clock_h = line_height(&TextStyle::numeric(11.0));
+    ART + TEXT_LEAD + clock_h.max(4.0) + TRANSPORT_LEAD + TRANSPORT
+}
+
 /// Top of the media block: the tab strip's bottom, with the block centred in
 /// the band between it and the footer. Shared by drawing and hit-testing.
+///
+/// The block is also clamped to the footer band: when the band is shorter than
+/// the block (a short frame mid-morph), centring alone would let the transport
+/// row run off the panel's bottom edge, so the block hugs the top instead.
 fn body_top(fh: f32, top: f32) -> f32 {
-    let band = (fh - crate::ui::FOOTER_BOTTOM_PAD - top).max(0.0);
-    // The real column: art row + one progress row + transport — centring on a
-    // taller estimate pushed the transport past the footer.
-    let clock_h = line_height(&TextStyle::numeric(11.0));
-    let body_h = ART + TEXT_LEAD + clock_h.max(4.0) + TEXT_LEAD + TRANSPORT;
-    top + (band - body_h).max(0.0) * 0.5
+    let band_bottom = (fh - crate::ui::FOOTER_BOTTOM_PAD).max(0.0);
+    let body_h = media_body_h();
+    let centred = top + ((band_bottom - top - body_h).max(0.0) * 0.5);
+    centred.min((band_bottom - body_h).max(top))
 }
 
 /// Widest clock the row can ever show (`−10:00:00`). Reserving this instead of
@@ -223,7 +243,7 @@ pub fn transport(fw: f32, fh: f32, top: f32) -> Vec<(Rect, crate::services::medi
     use crate::services::media::Command;
     // Below the progress row, not `body_top + ART`: the progress row moved under
     // the art, so the old anchor parked the buttons on top of the clocks.
-    let controls_y = progress_row(fw, body_top(fh, top)).1.max_y() + TEXT_LEAD;
+    let controls_y = progress_row(fw, body_top(fh, top)).1.max_y() + TRANSPORT_LEAD;
     let cmds = [Command::Previous, Command::PlayPause, Command::Next];
     let n = cmds.len() as f32;
     let total_w = n * TRANSPORT + (n - 1.0) * TRANSPORT_GAP;
@@ -256,8 +276,12 @@ fn empty(fw: f32, fh: f32) -> Vec<Node> {
         align: Align::Center,
     };
     let msg = "Nothing playing";
-    let w = measure(msg, &style);
     let h = line_height(&style);
+    // Full padded width, not `measure()`: the UI's measure is an approximation
+    // and DirectWrite advances real glyphs, so a box cut to the measured width
+    // trimmed the label to "Nothing playi…". Centred text in a generous box is
+    // always safe, and the string is far shorter than the panel.
+    let w = (fw - crate::ui::PANEL_PAD * 2.0).max(0.0);
     vec![Node::Text {
         rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
         text: msg.to_string(),
@@ -299,7 +323,7 @@ mod tests {
             + crate::ui::HEADER_GAP
             + crate::ui::TAB_H;
         let st = playing();
-        let nodes = content(PANEL_W_REF, PANEL_H_REF, top, &st);
+        let nodes = content(PANEL_W_REF, PANEL_H_REF, top, &st, false);
         let text = |want: &str| {
             nodes
                 .iter()
@@ -363,7 +387,7 @@ mod tests {
             + crate::ui::HEADER_GAP
             + crate::ui::TAB_H;
         let pad = crate::ui::PANEL_PAD;
-        for n in content(PANEL_W_REF, PANEL_H_REF, top, &playing()) {
+        for n in content(PANEL_W_REF, PANEL_H_REF, top, &playing(), false) {
             let r = n.rect();
             assert!(r.x >= pad - 0.5, "node escapes left pad: {r:?}");
             assert!(
@@ -371,5 +395,46 @@ mod tests {
                 "node escapes right pad: {r:?}"
             );
         }
+    }
+
+    #[test]
+    fn media_transport_row_fits_inside_the_panel() {
+        let top = crate::ui::HEADER_Y
+            + line_height(&TextStyle::title())
+            + crate::ui::HEADER_GAP
+            + crate::ui::TAB_H;
+        let nodes = content(PANEL_W_REF, PANEL_H_REF, top, &playing(), false);
+        let max_y = nodes.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
+        let footer_top = PANEL_H_REF - crate::ui::FOOTER_BOTTOM_PAD;
+        assert!(
+            max_y <= footer_top + 0.5,
+            "media content overflows the footer band: max_y={max_y} footer_top={footer_top}"
+        );
+    }
+
+    /// The Spotify skin is opt-in: default is NotchStar's monochrome white
+    /// fill, the accent only appears when the setting is on.
+    #[test]
+    fn accent_progress_tints_the_bar_fill_only_when_enabled() {
+        let top = crate::ui::HEADER_Y
+            + line_height(&TextStyle::title())
+            + crate::ui::HEADER_GAP
+            + crate::ui::TAB_H;
+        let st = playing();
+        let fill = |on: bool| {
+            content(PANEL_W_REF, PANEL_H_REF, top, &st, on)
+                .iter()
+                .find_map(|n| match n {
+                    Node::Bar { fill, .. } => Some(*fill),
+                    _ => None,
+                })
+                .expect("no bar node")
+        };
+        assert_eq!(fill(false), Rgba::WHITE, "default fill is monochrome");
+        assert_eq!(
+            fill(true),
+            st.accent.unwrap_or(FALLBACK_ACCENT),
+            "enabled fill is the album-art accent"
+        );
     }
 }

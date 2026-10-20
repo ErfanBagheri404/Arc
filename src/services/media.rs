@@ -126,6 +126,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 fn run(state: Arc<Mutex<MediaState>>, queue: Receiver<Command>, stop: Arc<Mutex<bool>>) {
     let mut manager: Option<GlobalSystemMediaTransportControlsSessionManager> = None;
     let mut last_art_key: Option<String> = None;
+    let mut last_art: Option<(crate::core::scene::ImageHandle, crate::core::geom::Rgba)> = None;
     let mut next_poll = Instant::now();
 
     loop {
@@ -134,11 +135,21 @@ fn run(state: Arc<Mutex<MediaState>>, queue: Receiver<Command>, stop: Arc<Mutex<
             return;
         }
 
-        // Drain commands first so a click feels immediate.
+        // Drain commands first so a click feels immediate. Applying a transport
+        // command is not enough on its own: the notch only redraws when a
+        // *published snapshot* changes, so without forcing a re-read here the
+        // pause took effect in the player while the pill kept showing "pause"
+        // for up to a full poll interval. Any command therefore ends the
+        // cadence early and the same iteration re-reads the session.
+        let mut applied = false;
         while let Ok(command) = queue.try_recv() {
             if let Some(session) = current_session(&mut manager) {
                 let _ = apply(&session, command);
+                applied = true;
             }
+        }
+        if applied {
+            next_poll = Instant::now();
         }
 
         if Instant::now() >= next_poll {
@@ -153,16 +164,23 @@ fn run(state: Arc<Mutex<MediaState>>, queue: Receiver<Command>, stop: Arc<Mutex<
                         snapshot.source, snapshot.title, snapshot.album
                     );
                     if last_art_key.as_deref() != Some(key.as_str()) {
+                        // New track: forget any cover we had for the previous one.
+                        last_art_key = Some(key.clone());
+                        last_art = None;
+                    }
+                    // Retry until the cover actually arrives; a session that
+                    // publishes its title before its thumbnail stream must not be
+                    // locked out until the track changes.
+                    if last_art.is_none() {
                         if let Some((handle, accent)) = fetch_art(&session) {
-                            snapshot.art = Some(handle.0);
-                            snapshot.accent = Some(accent);
-                            // Mark the track covered only once the bytes actually
-                            // arrived. A session that reports its title before its
-                            // thumbnail stream is ready must be retried next poll,
-                            // not locked out until the track changes -- otherwise
-                            // the art stays a flat placeholder forever.
-                            last_art_key = Some(key);
+                            last_art = Some((handle, accent));
                         }
+                    }
+                    // Carry the (possibly just fetched) cover onto this snapshot,
+                    // since `read()` never produces artwork itself.
+                    if let Some((handle, accent)) = last_art {
+                        snapshot.art = Some(handle.0);
+                        snapshot.accent = Some(accent);
                     }
                 }
                 if let Ok(mut guard) = state.lock() {
@@ -173,6 +191,7 @@ fn run(state: Arc<Mutex<MediaState>>, queue: Receiver<Command>, stop: Arc<Mutex<
                 // track forever.
                 *guard = MediaState::default();
                 last_art_key = None;
+                last_art = None;
             }
         }
 

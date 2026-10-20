@@ -62,9 +62,9 @@ pub const TABS: [&str; 9] = [
 pub const CONTENT_ROWS: usize = 3;
 
 /// Gap between tab items, from the reference's tab strip spacing.
-pub const TAB_GAP: f32 = 8.0;
+pub const TAB_GAP: f32 = 10.0;
 /// Horizontal padding inside the panel, applied on both sides.
-pub const PANEL_PAD: f32 = 20.0;
+pub const PANEL_PAD: f32 = 32.0;
 /// Top offset of the header row.
 pub const HEADER_Y: f32 = 16.0;
 /// Gap between the header's line box and the tab strip.
@@ -87,15 +87,64 @@ pub const TAB_PAD: f32 = 7.0;
 /// would over-size clocks and titles that already fit.
 pub const TAB_SLACK: f32 = 3.0;
 /// Corner radius of the hovered/active tab's background pill.
-pub const TAB_RADIUS: f32 = 8.0;
+pub const TAB_RADIUS: f32 = 10.0;
+/// Icon size inside a tab. Icon-only when idle (NotchStar's dock), so the
+/// strip costs 9 icons rather than 9 icons + 9 labels.
+pub const TAB_ICON: f32 = 17.0;
+/// Gap between a tab's icon and the label that appears when it is selected.
+pub const TAB_ICON_GAP: f32 = 5.0;
+
+/// One icon name per entry in [`TABS`], in the same order.
+pub const TAB_GLYPHS: [&str; 9] = [
+    "note",      // Media
+    "chart",     // Stats
+    "hourglass", // Timer
+    "clipboard", // Clipboard
+    "drop",      // Color
+    "bolt",      // Usage
+    "calendar",  // Calendar
+    "tray",      // Shelf
+    "terminal",  // Terminal
+];
 /// Height of one content row.
 pub const ROW_H: f32 = 24.0;
 /// Gap between content rows.
 pub const ROW_GAP: f32 = 8.0;
 /// Corner radius of the content rows (reference: `RoundedRectangle(r: 8)`).
 pub const ROW_RADIUS: f32 = 8.0;
-/// Gap between the footer clock and the bottom edge.
-pub const FOOTER_BOTTOM_PAD: f32 = 12.0;
+/// Gap between the tab dock and the panel's bottom edge.
+///
+/// The dock — the tab icon row — moved to the BOTTOM of the panel: NotchStar
+/// puts its navigation at the foot and spends the whole body above it on
+/// content. This pad is the gap between that foot and the panel edge.
+pub const DOCK_PAD: f32 = 10.0;
+/// Height of the tab dock band.
+pub const DOCK_H: f32 = TAB_H;
+/// Space between the dock's top edge and the content above it.
+pub const DOCK_GAP: f32 = 6.0;
+/// What the content band leaves clear at the bottom. It used to be a 12 px
+/// footer gap; now it must also cover the dock (`DOCK_PAD + DOCK_H`) plus the
+/// gap above it. Everything that reads it — drawing and hit-tests alike —
+/// reserves the same band, so content is never drawn over the dock nor
+/// clickable through it.
+pub const FOOTER_BOTTOM_PAD: f32 = DOCK_PAD + DOCK_H + DOCK_GAP;
+/// Corner icons (pin, settings) at the head of the panel.
+pub const CORNER_ICON: f32 = 14.0;
+/// Gap between the pin and the gear.
+///
+/// NotchStar's reference (1280 px wide, panel spans x 135–1144, i.e. 1009 px)
+/// puts the two corner glyphs 173 crop-px apart at 3× → 57.7 reference px →
+/// a 36.6 px pitch on Arc's 640 px panel. `CORNER_ICON` is 14, so the gap is
+/// the remainder: 22.
+pub const CORNER_ICON_GAP: f32 = 22.0;
+/// The dock's top edge, measured up from the panel's bottom.
+pub fn dock_top(fh: f32) -> f32 {
+    (fh - DOCK_PAD - DOCK_H).max(0.0)
+}
+/// The dock's centre line — the y hit-tests use.
+pub fn dock_center(fh: f32) -> f32 {
+    dock_top(fh) + DOCK_H * 0.5
+}
 /// Height of the collapsed pill's center glyph.
 pub const PILL_GLYPH: f32 = 14.0;
 /// Corner radius of the collapsed pill's center glyph.
@@ -105,13 +154,17 @@ pub const PILL_PROGRESS_BOTTOM_PAD: f32 = 6.0;
 /// Vertical padding around the idle pet in the collapsed pill: the sprite is
 /// the notch's centerpiece, so it may fill the pill more than the resting
 /// glyph's 14 px square.
-pub const PILL_PET_PAD: f32 = 4.0;
+pub const PILL_PET_PAD: f32 = 5.0;
 /// Spectrum bar width, and the gap between bars. Module-level (not local to
 /// `viz_bars`) because the pill's flank layout reserves the same slot width.
 const VIZ_BAR_W: f32 = 2.0;
 const VIZ_GAP: f32 = 2.0;
+// Collapsed-pill now-playing strip (MusicNotch pattern): art + title.
+const PILL_ART: f32 = 22.0;
+const PILL_ART_RADIUS: f32 = 6.0;
+const PILL_MEDIA_INSET: f32 = 6.0;
+const PILL_MEDIA_GAP: f32 = 6.0;
 /// Placeholder clock. A real tab replaces this with elapsed/remaining time.
-pub const FOOTER_CLOCK: &str = "00:00";
 
 /// Expanded panel height, mirrored from `app::state::PANEL_H`.
 // Test-only mirror of the reference heights (the parity suite asserts the
@@ -134,16 +187,15 @@ const PILL_GREY: Rgba = Rgba {
 const PILL_GREEN: Rgba = Rgba::rgb(0.20, 0.78, 0.35);
 const PILL_AMBER: Rgba = Rgba::rgb(0.95, 0.62, 0.11);
 
-/// Tab label style: 12 px regular, dimmed grey (the reference rests on
-/// white/grey, with a single album-art accent appearing elsewhere in the shell).
+/// Tab label style: 10 px semibold, NotchStar's dock label colour (#C7C7CC).
 const TAB_LABEL: TextStyle = TextStyle {
     mono: false,
-    size: 12.0,
-    weight: Weight::Regular,
+    size: 10.0,
+    weight: Weight::Semibold,
     color: Rgba {
-        r: 0.72,
-        g: 0.72,
-        b: 0.76,
+        r: 0.78,
+        g: 0.78,
+        b: 0.80,
         a: 1.0,
     },
     tabular: false,
@@ -159,6 +211,12 @@ pub struct ViewState {
     pub island_height: f32,
     /// Index into [`TABS`] of the selected tab.
     pub active_tab: usize,
+    /// Whether the island is pinned (visible over fullscreen apps). The header
+    /// pin icon wears this as its state.
+    pub pinned: bool,
+    /// Whether the media progress bar uses the album-art accent (Spotify skin)
+    /// instead of the default monochrome white. Opt-in via settings.
+    pub accent_progress: bool,
     /// Index into [`TABS`] under the cursor, if any.
     pub hover_tab: Option<usize>,
     /// Content row under the cursor, if any.
@@ -227,7 +285,7 @@ pub struct ViewState {
 /// A tab content swap in flight — crossfade, then rise.
 ///
 /// iOS swaps content by fading the old tab out quickly, then letting
-/// the new one rise from below on a spring (`SpringConfig::SWAP`).
+/// the new one rise from a spring (`SpringConfig::SWAP`).
 /// `phase` gates the outgoing tab; `rise` drives the incoming one
 /// (0 = below, 1 = landed).
 #[derive(Debug, Clone)]
@@ -236,6 +294,10 @@ pub struct TabSwap {
     phase: Option<crate::core::anim::Spring>,
     /// Rise progress for the incoming tab, 0..=1.
     rise: crate::core::anim::Spring,
+    /// NotchStar's sliding marker: 0 = sitting on the PREVIOUS tab's box,
+    /// 1 = on the active one. The pill glides between the two on a spring,
+    /// so a tab change is one moving shape, not a pop.
+    marker: crate::core::anim::Spring,
 }
 
 impl Default for TabSwap {
@@ -243,6 +305,7 @@ impl Default for TabSwap {
         Self {
             phase: None,
             rise: crate::core::anim::Spring::new(1.0, crate::core::anim::SpringConfig::SWAP),
+            marker: crate::core::anim::Spring::new(1.0, crate::core::anim::SpringConfig::SWAP),
         }
     }
 }
@@ -265,6 +328,12 @@ impl TabSwap {
         self.rise.value()
     }
 
+    /// Progress of the sliding tab marker: 0 = on the outgoing tab, 1 = on
+    /// the active one.
+    pub fn marker(&self) -> f32 {
+        self.marker.value()
+    }
+
     /// Kick off a swap. Retargeting mid-swap blends into the new
     /// target instead of jumping.
     pub fn swap_to(&mut self) {
@@ -273,6 +342,10 @@ impl TabSwap {
         self.phase = Some(fade);
         self.rise.snap(0.0);
         self.rise.set_target(1.0);
+        // The marker restarts at the outgoing box and glides across; snapping
+        // keeps it from jumping when a second tab is picked mid-slide.
+        self.marker.snap(0.0);
+        self.marker.set_target(1.0);
     }
 
     /// Advance both springs by `dt` seconds; returns whether more
@@ -287,7 +360,8 @@ impl TabSwap {
             self.phase = None;
         }
         let rising = self.rise.step(dt);
-        fading || rising
+        let marker = self.marker.step(dt);
+        fading || rising || marker
     }
 
     /// Diagnostic only: is either spring still integrating?
@@ -325,13 +399,44 @@ impl ViewState {
         if !self.content_visible() {
             return None;
         }
-        let top = HEADER_Y + header_height() + HEADER_GAP;
-        if !(top..top + TAB_H).contains(&y) {
+        // The dock sits at the FOOT of the panel, so its hit band is the same
+        // band the strip is drawn in — measured up from the bottom edge, not
+        // down from the header.
+        let cy = dock_center(self.island_height);
+        if !(cy - TAB_H * 0.5..cy + TAB_H * 0.5).contains(&y) {
             return None;
         }
-        tab_boxes(self.island_width)
+        tab_boxes(
+            self.island_width,
+            self.active_tab,
+            self.prev_tab,
+            self.tab_swap.marker(),
+        )
             .into_iter()
             .position(|(left, w)| w > 0.0 && x >= left && x <= left + w)
+    }
+
+    /// Which header corner icon contains panel-space `(x, y)`, if any.
+    ///
+    /// Pin and settings sit on the header line, right-aligned, mirroring
+    /// NotchStar. Drawn and hit-tested from the same rects so a click can never
+    /// land on a different icon than the one under the cursor.
+    pub fn corner_at(&self, x: f32, y: f32) -> Option<CornerIcon> {
+        if !self.content_visible() {
+            return None;
+        }
+        let top = HEADER_Y + (header_height() - CORNER_ICON) * 0.5;
+        if !(top..top + CORNER_ICON).contains(&y) {
+            return None;
+        }
+        let (settings_x, pin_x) = corner_icons_x(self.island_width);
+        if x >= settings_x && x <= settings_x + CORNER_ICON {
+            return Some(CornerIcon::Settings);
+        }
+        if x >= pin_x && x <= pin_x + CORNER_ICON {
+            return Some(CornerIcon::Pin);
+        }
+        None
     }
 
     /// Which content row contains panel-space `(x, y)`, if any.
@@ -375,7 +480,7 @@ impl ViewState {
         if self.active_tab != CLIPBOARD_TAB || !self.content_visible() {
             return None;
         }
-        let top = HEADER_Y + header_height() + HEADER_GAP;
+        let top = row_band_top();
         if !self.clip_enabled {
             let r = clipboard::consent_rect(self.island_width, top);
             return (x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y()).then_some(0);
@@ -422,7 +527,10 @@ impl ViewState {
         if self.active_tab != PICKER_TAB || !self.content_visible() {
             return None;
         }
-        let top = HEADER_Y + header_height() + HEADER_GAP;
+        // `row_band_top()`, NOT the tab strip's top: the readout is DRAWN below
+        // the strip, so hit-testing from the strip's own top put a 44 px
+        // invisible block across the tabs and swallowed every tab click.
+        let top = row_band_top();
         let r = picker::readout_rect(self.island_width, top);
         if x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y() {
             return Some(0);
@@ -435,7 +543,7 @@ impl ViewState {
         if self.active_tab != TIMER_TAB || !self.content_visible() {
             return None;
         }
-        let top = HEADER_Y + header_height() + HEADER_GAP;
+        let top = row_band_top();
         timer::buttons(self.island_width, top)
             .into_iter()
             .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
@@ -462,10 +570,28 @@ impl ViewState {
 ///
 /// Single source of truth for the strip: drawing and hit-testing both read it, so
 /// a click can never land on a different tab than the one that was drawn.
-fn tab_boxes(fw: f32) -> Vec<(f32, f32)> {
+///
+/// NotchStar's dock, adapted: an idle tab is just its icon, and only the
+/// SELECTED tab carries a label. `reveal` (0..1, the swap's marker spring)
+/// cross-fades the two labels — the incoming one opens while the outgoing one
+/// closes — so a tab change is one continuous motion: the previous tab's text
+/// retreats to its icon while the pressed tab's text unfurls beside it.
+fn tab_boxes(fw: f32, active: usize, prev: usize, reveal: f32) -> Vec<(f32, f32)> {
+    let reveal = reveal.clamp(0.0, 1.0);
     let natural: Vec<f32> = TABS
         .iter()
-        .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0 + TAB_SLACK)
+        .enumerate()
+        .map(|(i, label)| {
+            let base = TAB_PAD * 2.0 + TAB_ICON;
+            let open = if i == active {
+                reveal
+            } else if i == prev && prev != active {
+                1.0 - reveal
+            } else {
+                0.0
+            };
+            base + (TAB_ICON_GAP + measure(label, &TAB_LABEL) + TAB_SLACK) * open
+        })
         .collect();
     layout::row_items(&natural, TAB_GAP, fw - PANEL_PAD * 2.0)
         .into_iter()
@@ -526,7 +652,7 @@ pub fn build(state: &ViewState) -> Frame {
                 // The idle pet wins over the glyph: a live mascot is the whole
                 // point of the notch, and the sprite already IS a centered mark.
                 if state.media.playing {
-                    for n in viz_bars(fw, fh, state, glyph_opacity) {
+                    for n in pill_media(fw, fh, state, glyph_opacity) {
                         scene.push(n);
                     }
                 } else if let Some(pet) = state.pet {
@@ -569,6 +695,13 @@ pub fn build(state: &ViewState) -> Frame {
         scene.push(bar);
     }
 
+    // 3b. Collapsed progress arc: a ring around the pill (Dynamic-Island /
+    //     VNotch style). Fades on the same curve as the inline bar so the
+    //     panel never shows two progress indicators at once.
+    if let Some(arc) = pill_progress_arc(fw, fh, state, glyph_opacity) {
+        scene.push(arc);
+    }
+
     // 4. Mic-in-use dot: a standing indicator, not a HUD. It sits at the pill's
     //    right edge, clear of the centred glyph, and fades with the same curve.
     if state.mic_active && glyph_opacity > 0.0 {
@@ -604,11 +737,8 @@ pub fn build(state: &ViewState) -> Frame {
         let slot_left = ((fw - slot_w) / 2.0 - 8.0).max(0.0);
         let mut x = 10.0f32;
         let mut rows: Vec<String> = Vec::new();
-        // Now Playing leads the pill (DynamicNotch/Atoll): the track the user
-        // is actually listening to is worth more than the weather.
-        if state.media.playing && !state.media.title.is_empty() {
-            rows.push(state.media.title.clone());
-        }
+        // The now-playing title is owned by `pill_media` (art + title row), so
+        // the standing rows never duplicate it — that drew the track twice.
         rows.extend(
             state
                 .weather
@@ -663,6 +793,14 @@ pub fn build(state: &ViewState) -> Frame {
         (open - layout::CONTENT_FADE_IN_START) / (1.0 - layout::CONTENT_FADE_IN_START),
     );
     if content_opacity > 0.0 {
+        // Chrome (header title, corner icons, dock) is drawn UNCHANGED by a tab
+        // swap — only its alpha tracks the open spring. Folding it into the
+        // staggered group below made `Arc` and the dock slide with the body,
+        // which reads as the whole panel being rebuilt on every click.
+        for mut c in panel_chrome(fw, fh, state) {
+            fade_node(&mut c, content_opacity);
+            scene.push(c);
+        }
         // iOS-style swap: the outgoing tab's body fades out first, then the
         // incoming one rises from a few px below as the spring lands. Idle
         // swaps sit at rise = 1.0, so a settled frame is unchanged.
@@ -671,7 +809,7 @@ pub fn build(state: &ViewState) -> Frame {
         if outgoing > 0.0 {
             let mut old = Node::Group {
                 rect: frame,
-                children: panel_content_for(fw, fh, state, state.prev_tab),
+                children: panel_body(fw, fh, state, state.prev_tab),
             };
             if let Node::Group { children, .. } = &mut old {
                 children
@@ -683,7 +821,7 @@ pub fn build(state: &ViewState) -> Frame {
         let rise = swap.rise();
         let mut group = Node::Group {
             rect: frame,
-            children: panel_content(fw, fh, state),
+            children: panel_body(fw, fh, state, state.active_tab),
         };
         if let Node::Group { children, .. } = &mut group {
             children.iter_mut().enumerate().for_each(|(i, c)| {
@@ -748,8 +886,33 @@ fn pill_progress(fw: f32, fh: f32, state: &ViewState, opacity: f32) -> Option<No
     })
 }
 
+/// Collapsed-pill progress arc: a ring around the pill (Dynamic-Island /
+/// VNotch style). Returns `None` when nothing is playing, the island is
+/// opening, or the duration is unknown.
+fn pill_progress_arc(fw: f32, fh: f32, state: &ViewState, opacity: f32) -> Option<Node> {
+    let m = &state.media;
+    if opacity <= 0.0 || !m.playing {
+        return None;
+    }
+    let span = m.duration?.as_secs_f32();
+    if span <= 0.0 {
+        return None;
+    }
+    let frac = (m.position.as_secs_f32() / span).clamp(0.0, 1.0);
+    let fill = if state.accent_progress {
+        m.accent.unwrap_or(Rgba::WHITE)
+    } else {
+        Rgba::WHITE
+    };
+    Some(Node::Arc {
+        rect: put(fw, fh, Rect::new(0.0, 0.0, fw, fh)),
+        progress: frac,
+        track: layout::fade(Rgba::rgba(0.29, 0.29, 0.31, 1.0), opacity),
+        fill: layout::fade(fill, opacity),
+        thickness: 2.5,
+    })
+}
 /// Clamp a rect into the frame. Every emitted rect goes through here, which is
-/// what guarantees the bounds invariant asserted by the sweep tests.
 ///
 /// This matters because the island is mid-spring: the window can be far smaller
 /// than the panel it is morphing out of, and content laid out in panel space must
@@ -777,61 +940,50 @@ pub fn stagger_progress(rise: f32, index: usize) -> f32 {
     ((rise - delay) / (1.0 - delay)).clamp(0.0, 1.0)
 }
 
-/// The expanded panel's contents, in draw order: header, tabs, rows, footer.
-fn panel_content(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
-    panel_content_for(fw, fh, state, state.active_tab)
+/// The expanded panel's chrome: header, corner icons, and the bottom dock.
+///
+/// Drawn ONCE per frame, with no fade/rise of its own. Splitting it out from
+/// the body is what stops the `Arc` title and the dock from sliding with a tab
+/// swap — only the body cross-fades, the chrome stays put.
+fn panel_chrome(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
+    let mut out = header_block(fw, fh);
+    out.extend(corner_icons(fw, fh, state));
+    out.extend(tab_strip(fw, fh, state));
+    out
 }
 
-/// [`panel_content`] for an explicit tab — the outgoing half of a swap
-/// renders the tab that is being left behind.
-fn panel_content_for(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Node> {
-    let mut out = header_block(fw, fh);
-    let tabs = tab_strip(fw, fh, header_height(), state);
-    let tab_bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
-    out.extend(tabs);
+/// The tab body alone: no header, no dock. That is the part a swap animates.
+fn panel_body(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Node> {
+    let tab_bottom = row_band_top();
     if tab == MEDIA_TAB {
-        out.extend(media::content(fw, fh, tab_bottom, &state.media));
+        media::content(fw, fh, tab_bottom, &state.media, state.accent_progress)
     } else if tab == STATS_TAB {
-        out.extend(stats::content(
-            fw,
-            fh,
-            tab_bottom,
-            &state.stats,
-            &state.procs,
-        ));
+        stats::content(fw, fh, tab_bottom, &state.stats, &state.procs)
     } else if tab == TIMER_TAB {
-        out.extend(timer::content(fw, fh, tab_bottom, &state.timer));
+        timer::content(fw, fh, tab_bottom, &state.timer)
     } else if tab == CLIPBOARD_TAB {
-        out.extend(clipboard::content(
-            fw,
-            fh,
-            tab_bottom,
-            &state.clip_entries,
-            state.clip_enabled,
-        ));
+        clipboard::content(fw, fh, tab_bottom, &state.clip_entries, state.clip_enabled)
     } else if tab == PICKER_TAB {
-        out.extend(picker::content(fw, fh, tab_bottom, &state.picker));
+        picker::content(fw, fh, tab_bottom, &state.picker)
     } else if tab == CALENDAR_TAB {
-        out.extend(calendar::content(fw, fh, tab_bottom, &state.cal));
+        calendar::content(fw, fh, tab_bottom, &state.cal)
     } else if tab == SHELF_TAB {
-        out.extend(shelf::content(fw, fh, tab_bottom, &state.shelf));
+        shelf::content(fw, fh, tab_bottom, &state.shelf)
     } else if tab == USAGE_TAB {
-        out.extend(usage::content(fw, fh, tab_bottom, &state.usage));
+        usage::content(fw, fh, tab_bottom, &state.usage)
     } else if tab == TERMINAL_TAB {
-        out.extend(terminal::content(
+        // Settings now live in their own window (tray → Settings…), so the
+        // expanded notch no longer hosts a Settings tab.
+        terminal::content(
             fw,
             fh,
             tab_bottom,
             state.terminal.as_ref(),
             state.terminal_error.as_deref(),
-        ));
-        // Settings now live in their own window (tray → Settings…), so the
-        // expanded notch no longer hosts a Settings tab.
+        )
     } else {
-        out.extend(content_rows(fw, fh, tab_bottom, state));
+        content_rows(fw, fh, tab_bottom, state)
     }
-    out.extend(footer_block(fw, fh));
-    out
 }
 
 /// Index in [`TABS`] of the Media tab — the one with a real content surface.
@@ -857,10 +1009,14 @@ fn header_height() -> f32 {
 }
 
 /// Header row: the title, at `TextStyle::title()` (20 px semibold white).
+///
+/// The box is the measured run **plus slack**. Sizing it to exactly
+/// `measure(APP_TITLE)` clipped the title to `A…`: `measure` is an approximation
+/// and DirectWrite's real advance is a hair wider, so an exactly-sized box
+/// ellipsizes its own text. Same trap as the remaining-time label.
 fn header_block(fw: f32, fh: f32) -> Vec<Node> {
     let mut style = TextStyle::title();
     style.align = Align::Start;
-    // Reserve exactly the measured run; the renderer re-measures at draw time.
     vec![Node::Text {
         rect: put(
             fw,
@@ -868,13 +1024,56 @@ fn header_block(fw: f32, fh: f32) -> Vec<Node> {
             Rect::new(
                 PANEL_PAD,
                 HEADER_Y,
-                measure(APP_TITLE, &style),
+                measure(APP_TITLE, &style) + HEADER_SLACK,
                 line_height(&style),
             ),
         ),
         text: APP_TITLE.to_string(),
         style,
     }]
+}
+
+/// Breathing room past the measured title run so DirectWrite never trims it.
+const HEADER_SLACK: f32 = 8.0;
+
+/// Which of the header's corner icons a point lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CornerIcon {
+    Pin,
+    Settings,
+}
+
+/// The corner pair: pin, then settings, right-aligned on the header line.
+///
+/// NotchStar's title row is exactly this — the wordmark alone on the left, a
+/// pin and a gear at the right — so the notch carries the same two controls
+/// where the reference puts them.
+fn corner_icons(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
+    let y = HEADER_Y + (header_height() - CORNER_ICON) * 0.5;
+    let settings_x = corner_icons_x(fw).0;
+    let pin_x = corner_icons_x(fw).1;
+    let idle = Rgba::rgba(0.91, 0.91, 0.91, 1.0);
+    vec![
+        // The pin carries the pinned/hidden state, so it is white only while
+        // the island is pinned over fullscreen apps.
+        Node::Glyph {
+            rect: put(fw, fh, Rect::new(pin_x, y, CORNER_ICON, CORNER_ICON)),
+            name: "pin",
+            color: if state.pinned { Rgba::WHITE } else { idle },
+        },
+        Node::Glyph {
+            rect: put(fw, fh, Rect::new(settings_x, y, CORNER_ICON, CORNER_ICON)),
+            name: "settings",
+            color: idle,
+        },
+    ]
+}
+
+/// `(settings_x, pin_x)` — the two corner icons' left edges, right-aligned.
+/// Single source of truth so drawing and hit-testing cannot drift apart.
+fn corner_icons_x(fw: f32) -> (f32, f32) {
+    let settings_x = fw - PANEL_PAD - CORNER_ICON;
+    (settings_x, settings_x - CORNER_ICON_GAP - CORNER_ICON)
 }
 
 /// The five-tab strip, centered, 8 px between items.
@@ -886,15 +1085,30 @@ fn header_block(fw: f32, fh: f32) -> Vec<Node> {
 /// The selected tab gets the stronger micro-fill; the
 /// hovered one gets it at 24 % of that. The two states are additive rather than
 /// exclusive, so hovering the selected tab deepens it instead of doing nothing.
-fn tab_strip(fw: f32, fh: f32, header_h: f32, state: &ViewState) -> Vec<Node> {
-    let y = HEADER_Y + header_h + HEADER_GAP;
+///
+/// NotchStar's dock behaviour, adapted to a text strip: every tab carries an
+/// icon left of its label, and the selected pill is ONE shape that glides from
+/// the box it was on to the box that was just picked (stepped by the swap's
+/// `marker` spring) instead of blinking off one tab and on to the next.
+fn tab_strip(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
+    // Anchored to the panel's FOOT, NotchStar's dock. `fh` is the live island
+    // height, so the dock rides down with the window as it opens instead of
+    // being pinned to a fixed y that only works at full size.
+    let y = dock_top(fh);
+    let active = state.active_tab.min(TABS.len() - 1);
+    let prev = state.prev_tab.min(TABS.len() - 1);
+    let reveal = state.tab_swap.marker().clamp(0.0, 1.0);
+    let boxes = tab_boxes(fw, active, prev, reveal);
     let mut out = Vec::with_capacity(TABS.len() * 3);
+    if boxes.len() != TABS.len() {
+        return out;
+    }
 
-    for (i, (label, (left, w))) in TABS.iter().zip(tab_boxes(fw)).enumerate() {
+    for (i, (label, (left, w))) in TABS.iter().zip(boxes).enumerate() {
         if w <= 0.0 {
             continue;
         }
-        let selected = i == state.active_tab;
+        let selected = i == active;
         let hovered = state.hover_tab == Some(i);
         if selected || hovered {
             // The reference's micro-fill reads as a *lift* out of pure black, so
@@ -903,31 +1117,58 @@ fn tab_strip(fw: f32, fh: f32, header_h: f32, state: &ViewState) -> Vec<Node> {
             out.push(Node::RoundRect {
                 rect: put(fw, fh, Rect::new(left, y, w, TAB_H)),
                 radii: CornerRadii::uniform(TAB_RADIUS),
-                fill: Rgba::rgba(1.0, 1.0, 1.0, if selected { 0.16 } else { 0.06 }),
+                fill: Rgba::rgba(1.0, 1.0, 1.0, if selected { 0.22 } else { 0.08 }),
             });
         }
         let color = if selected {
             Rgba::WHITE
+        } else if hovered {
+            Rgba::rgba(0.88, 0.88, 0.92, 1.0)
         } else {
             TAB_LABEL.color
         };
-        out.push(Node::Text {
-            rect: put(
-                fw,
-                fh,
-                Rect::new(
-                    left + TAB_PAD,
-                    y,
-                    w - TAB_PAD * 2.0,
-                    line_height(&TAB_LABEL),
-                ),
-            ),
-            text: label.to_string(),
-            style: TextStyle {
-                color,
-                ..TAB_LABEL.clone()
-            },
+
+        // Icon always; label only on the tab that is opening or closing, and
+        // both are driven by the SAME spring as the box width, so the box and
+        // its text can never disagree mid-flight.
+        let iy = y + (TAB_H - TAB_ICON) / 2.0;
+        out.push(Node::Glyph {
+            rect: put(fw, fh, Rect::new(left + TAB_PAD, iy, TAB_ICON, TAB_ICON)),
+            name: TAB_GLYPHS[i],
+            color,
         });
+        let open = if selected {
+            reveal
+        } else if i == prev && prev != active {
+            1.0 - reveal
+        } else {
+            0.0
+        };
+        if open > 0.02 {
+            // The label keeps its FINAL width and only fades/slides in — sizing
+            // it to the animating box would ellipsize the text mid-reveal
+            // (`Cale…` for two frames) instead of wiping it open.
+            let label_w = measure(label, &TAB_LABEL);
+            let inset = (1.0 - open) * TAB_ICON_GAP;
+            out.push(Node::Text {
+                rect: put(
+                    fw,
+                    fh,
+                    Rect::new(
+                        left + TAB_PAD + (TAB_ICON + TAB_ICON_GAP - inset) * open,
+                        y,
+                        label_w + TAB_SLACK,
+                        line_height(&TAB_LABEL),
+                    ),
+                ),
+                text: label.to_string(),
+                style: TextStyle {
+                    color: Rgba::rgba(color.r, color.g, color.b, open),
+                    align: Align::Start,
+                    ..TAB_LABEL.clone()
+                },
+            });
+        }
     }
     out
 }
@@ -941,10 +1182,11 @@ fn row_boxes(fw: f32, fh: f32) -> Vec<(f32, f32, f32, f32)> {
     row_rects_below(fw, fh, row_band_top())
 }
 
-/// Panel-space y of the top of the row band: just under the tab strip. Matches
-/// the measured `tab_bottom` [`build`] passes, so hit-testing and drawing agree.
+/// Panel-space y of the top of the row band: just under the header. The dock
+/// is at the FOOT now, so nothing sits between the header and the content —
+/// matching how NotchStar stacks wordmark, body, dock.
 fn row_band_top() -> f32 {
-    HEADER_Y + header_height() + HEADER_GAP + TAB_H
+    HEADER_Y + header_height() + HEADER_GAP
 }
 
 /// Row geometry below an explicit band top. Split out so [`build`] can pass the
@@ -980,6 +1222,11 @@ fn row_rects_below(fw: f32, fh: f32, top: f32) -> Vec<(f32, f32, f32, f32)> {
 /// outlines land in Phase 8), so an icon-based HUD would draw a grey box.
 fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<Node> {
     use crate::app::hud::Hud;
+    // A banner is not a gauge: it needs a wider track and a second line, so it
+    // returns its own layout instead of bending the readout's contract.
+    if let Hud::Notification { app, title, body } = hud {
+        return pill_notification(fw, fh, app, title, body, opacity);
+    }
     // A short inset fill behind the readout: the pill is 34 px tall, so the HUD
     // reads as a tinted track rather than a label floating on black.
     let h = (fh - 10.0).max(4.0);
@@ -1046,6 +1293,9 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
             },
             None,
         ),
+        // Unreachable: the banner returns its own layout above. Listed only so
+        // the match stays exhaustive when a new Hud variant is added.
+        Hud::Notification { .. } => (PILL_GREY, String::new(), None),
     };
 
     let mut out = vec![Node::RoundRect {
@@ -1075,6 +1325,77 @@ fn pill_hud(fw: f32, fh: f32, hud: &crate::app::hud::Hud, opacity: f32) -> Vec<N
     });
     out
 }
+
+/// A two-line banner for a notification toast (NotchStar/TopNotch's toast).
+fn pill_notification(
+    fw: f32,
+    fh: f32,
+    app: &str,
+    title: &str,
+    body: &str,
+    opacity: f32,
+) -> Vec<Node> {
+    let track = Rect::new(
+        (fw - PILL_NOTIF_W) / 2.0,
+        (fh - (PILL_NOTIF_H - 4.0)) / 2.0,
+        PILL_NOTIF_W,
+        PILL_NOTIF_H - 4.0,
+    );
+    let mut out = vec![Node::RoundRect {
+        rect: put(fw, fh, track),
+        radii: CornerRadii::uniform(track.h / 2.0),
+        fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.10), opacity),
+    }];
+    let style = TextStyle::numeric(9.5);
+        let lh = line_height(&style);
+        // App name + title on the first line, body on the second. Each rect is the
+        // measured run plus `NOTIF_SLACK`: the approximator under-reports, and a
+        // rect sized exactly to it makes the renderer ellipsize its own text.
+        const NOTIF_SLACK: f32 = 10.0;
+        let head = format!(
+            "{} \u{b7} {}",
+            app.chars().take(12).collect::<String>(),
+            title.chars().take(18).collect::<String>()
+        );
+        let head_w = measure(&head, &style) + NOTIF_SLACK;
+        out.push(Node::Text {
+            rect: put(
+                fw,
+                fh,
+                Rect::new((fw - head_w) / 2.0, track.y + 1.0, head_w, lh),
+            ),
+            text: head,
+            style: TextStyle {
+                color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.92), opacity),
+                ..style
+            },
+        });
+        let body_text: String = body.chars().take(30).collect();
+        let body_w = measure(&body_text, &style) + NOTIF_SLACK;
+        out.push(Node::Text {
+            rect: put(
+                fw,
+                fh,
+                Rect::new(
+                    (fw - body_w) / 2.0,
+                    track.y + 1.0 + lh,
+                    body_w,
+                    lh,
+                ),
+            ),
+            text: body_text,
+        style: TextStyle {
+            color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.62), opacity),
+            ..style
+        },
+    });
+    out
+}
+
+/// Width of the notification banner inside the pill.
+const PILL_NOTIF_W: f32 = 150.0;
+/// Height of the notification banner inside the pill.
+const PILL_NOTIF_H: f32 = 30.0;
 
 /// Width of the HUD's gauge track inside the pill.
 const PILL_HUD_W: f32 = 54.0;
@@ -1158,6 +1479,71 @@ impl Viz {
 
 /// Atoll's spectrum: four 2 px bars, gap 2 px, centred in the pill glyph slot,
 /// heights from the visualizer springs. Drawn where the resting glyph would be.
+fn pill_media(fw: f32, fh: f32, state: &ViewState, alpha: f32) -> Vec<Node> {
+    if alpha <= 0.4 {
+        return Vec::new();
+    }
+    let art = PILL_ART;
+    let y_art = (fh - art) / 2.0;
+    let x_art = PILL_MEDIA_INSET;
+    let mut out = Vec::with_capacity(4);
+
+    // Art thumbnail.
+    out.push(Node::Image {
+        rect: put(fw, fh, Rect::new(x_art, y_art, art, art)),
+        handle: state
+            .media
+            .art
+            .map(crate::core::scene::ImageHandle)
+            .unwrap_or_default(),
+        radii: CornerRadii::uniform(PILL_ART_RADIUS),
+    });
+
+    // Viz bars at the right edge.
+    let viz_total = VIZ_BAR_W * 4.0 + VIZ_GAP * 3.0;
+    let viz_x0 = fw - PILL_MEDIA_INSET - viz_total;
+    let cy = fh / 2.0;
+    let heights = state.viz.heights();
+    for (i, h) in heights.iter().enumerate() {
+        let hh = (14.0 * h).max(3.0);
+        out.push(Node::RoundRect {
+            rect: put(
+                fw,
+                fh,
+                Rect::new(
+                    viz_x0 + i as f32 * (VIZ_BAR_W + VIZ_GAP),
+                    cy - hh / 2.0,
+                    VIZ_BAR_W,
+                    hh,
+                ),
+            ),
+            radii: CornerRadii::uniform(VIZ_BAR_W / 2.0),
+            fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.9), alpha),
+        });
+    }
+
+    // Title text in the gap between art and viz bars.
+    let tx = x_art + art + PILL_MEDIA_GAP;
+    let tw = (viz_x0 - tx - PILL_MEDIA_GAP).max(8.0);
+    let style = TextStyle {
+        size: 10.5,
+        weight: Weight::Semibold,
+        color: layout::fade(Rgba::WHITE, alpha),
+        ..TextStyle::default()
+    };
+    let th = line_height(&style);
+    let ty = (fh - th) / 2.0 - 0.5;
+    out.push(Node::Text {
+        rect: put(fw, fh, Rect::new(tx, ty, tw, th)),
+        text: if state.media.title.is_empty() {
+            "Now playing".to_string()
+        } else {
+            state.media.title.clone()
+        },
+        style,
+    });
+    out
+}
 fn viz_bars(fw: f32, fh: f32, state: &ViewState, alpha: f32) -> Vec<Node> {
     const MAX_H: f32 = 14.0;
     let heights = state.viz.heights();
@@ -1187,19 +1573,6 @@ fn viz_bars(fw: f32, fh: f32, state: &ViewState, alpha: f32) -> Vec<Node> {
         .collect()
 }
 
-/// Footer clock, bottom-left, tabular figures at 12 px.
-fn footer_block(fw: f32, fh: f32) -> Vec<Node> {
-    let style = TextStyle::numeric(12.0);
-    let w = measure(FOOTER_CLOCK, &style);
-    let h = line_height(&style);
-    let y = (fh - FOOTER_BOTTOM_PAD - h).max(0.0);
-    vec![Node::Text {
-        rect: put(fw, fh, Rect::new(PANEL_PAD, y, w, h)),
-        text: FOOTER_CLOCK.to_string(),
-        style,
-    }]
-}
-
 /// How much smaller (as a fraction of height) incoming content starts
 /// its rise. A nudge — the iOS effect is scale you feel, not see.
 const SWAP_SCALE_DELTA: f32 = 0.03;
@@ -1217,6 +1590,7 @@ fn scale_about_top(node: &mut Node, factor: f32) {
         | Node::Image { rect, .. }
         | Node::Sprite { rect, .. }
         | Node::Bar { rect, .. }
+        | Node::Arc { rect, .. }
         | Node::Glyph { rect, .. }
         | Node::Group { rect, .. } => rect.h = h * factor,
     }
@@ -1232,6 +1606,10 @@ fn fade_node(node: &mut Node, opacity: f32) {
     match node {
         Node::RoundRect { fill, .. } => *fill = layout::fade(*fill, opacity),
         Node::Bar { track, fill, .. } => {
+            *track = layout::fade(*track, opacity);
+            *fill = layout::fade(*fill, opacity);
+        }
+        Node::Arc { track, fill, .. } => {
             *track = layout::fade(*track, opacity);
             *fill = layout::fade(*fill, opacity);
         }
@@ -1293,9 +1671,9 @@ mod tests {
         // `tab_boxes` is the single source of truth for drawing and hit-testing,
         // so feeding each box's own center back in must round-trip, and a miss
         // must keep the old selection instead of clearing it.
-        let top = HEADER_Y + header_height() + HEADER_GAP;
+        let top = dock_top(PANEL_H_REF);
         let y = top + TAB_H / 2.0;
-        let boxes = tab_boxes(PANEL_W_REF);
+        let boxes = tab_boxes(PANEL_W_REF, 0, 0, 1.0);
         assert!(boxes.len() >= 2, "need multiple tabs to test selection");
         for (i, (left, w)) in boxes.iter().enumerate() {
             let mut v = ViewState {
@@ -1355,8 +1733,8 @@ mod tests {
     #[test]
     fn tab_hit_testing_matches_the_drawn_strip() {
         let v = view(0, None);
-        for (i, (left, w)) in tab_boxes(PANEL_W_REF).into_iter().enumerate() {
-            let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
+        for (i, (left, w)) in tab_boxes(PANEL_W_REF, 0, 0, 1.0).into_iter().enumerate() {
+            let y = dock_center(PANEL_H_REF);
             assert_eq!(v.tab_at(left + w / 2.0, y), Some(i), "centre of tab {i}");
             assert_eq!(v.tab_at(left + 0.5, y), Some(i), "left edge of tab {i}");
             assert_eq!(
@@ -1370,8 +1748,8 @@ mod tests {
     #[test]
     fn tab_hit_testing_rejects_the_gaps_and_the_margins() {
         let v = view(0, None);
-        let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
-        let boxes = tab_boxes(PANEL_W_REF);
+        let y = dock_center(PANEL_H_REF);
+        let boxes = tab_boxes(PANEL_W_REF, 0, 0, 1.0);
         let (first_left, _) = boxes[0];
         // Left margin, before the first tab.
         assert_eq!(v.tab_at(first_left - 1.0, y), None);
@@ -1386,20 +1764,64 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_pill_shows_inline_progress_only_while_playing() {
+    fn collapsed_pill_shows_the_now_playing_row_only_while_playing() {
         let mut v = view_sized(PILL_W_REF, PILL_H_REF);
-        // Nothing playing: pill is body + glyph only.
+        v.pet = None;
+        // Nothing playing: pill is body + resting glyph.
         assert_eq!(all_nodes(&build(&v)).len(), 2);
         v.media.playing = true;
+        v.media.title = "Late Night Drive".into();
         v.media.position = std::time::Duration::from_secs(30);
         v.media.duration = Some(std::time::Duration::from_secs(60));
-        // Playing: the bar's group + two leaves (track, accent fill) join in,
-        // and the glyph slot now holds the four spectrum bars instead.
+        // Playing: the glyph slot holds the MusicNotch-style row — art
+        // thumbnail, four spectrum bars, title — plus the progress group.
         let f = build(&v);
-        assert_eq!(all_nodes(&f).len(), 5 - 1 + 4);
+        assert!(
+            f.scene
+                .nodes
+                .iter()
+                .any(|n| matches!(n, Node::Image { .. })),
+            "the playing pill must show the album art"
+        );
+        assert!(
+            f.scene
+                .nodes
+                .iter()
+                .any(|n| matches!(n, Node::Text { text, .. } if text == "Late Night Drive")),
+            "the playing pill must show the track title"
+        );
+        // 1 body + 6 row nodes + 3 bar group nodes + 1 progress arc.
+        assert_eq!(all_nodes(&f).len(), 1 + 6 + 3 + 1);
         // Live stream with unknown duration: no bar to pin at zero.
         v.media.duration = None;
-        assert_eq!(all_nodes(&build(&v)).len(), 1 + 4);
+        assert_eq!(all_nodes(&build(&v)).len(), 1 + 6);
+    }
+
+    #[test]
+    fn collapsed_pill_draws_a_progress_arc_only_while_playing() {
+        let mut v = view_sized(PILL_W_REF, PILL_H_REF);
+        v.pet = None;
+        v.media.duration = Some(std::time::Duration::from_secs(60));
+        assert!(
+            !all_nodes(&build(&v))
+                .iter()
+                .any(|n| matches!(n, Node::Arc { .. })),
+            "idle pill has no ring"
+        );
+        v.media.playing = true;
+        v.media.position = std::time::Duration::from_secs(30);
+        let arc = all_nodes(&build(&v))
+            .into_iter()
+            .find_map(|n| match n {
+                Node::Arc { progress, rect, .. } => Some((progress, rect)),
+                _ => None,
+            })
+            .expect("playing pill must ring itself");
+        assert!((arc.0 - 0.5).abs() < 1e-3, "half-way through: {}", arc.0);
+        assert!(
+            arc.1.w <= PILL_W_REF + 0.5 && arc.1.h <= PILL_H_REF + 0.5,
+            "ring escapes the pill"
+        );
     }
 
     #[test]
@@ -1433,7 +1855,7 @@ mod tests {
         let mut v = view(0, None);
         v.island_width = PILL_W_REF;
         v.island_height = PILL_H_REF;
-        let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
+        let y = dock_center(PANEL_H_REF);
         assert_eq!(v.tab_at(PILL_W_REF / 2.0, y), None);
         assert_eq!(v.click_tab(PILL_W_REF / 2.0, y), None);
     }
@@ -1441,8 +1863,8 @@ mod tests {
     #[test]
     fn click_selects_the_tab_under_the_cursor_and_leaves_others_alone() {
         let mut v = view(0, None);
-        let y = HEADER_Y + header_height() + HEADER_GAP + TAB_H / 2.0;
-        let boxes = tab_boxes(PANEL_W_REF);
+        let y = dock_center(PANEL_H_REF);
+        let boxes = tab_boxes(PANEL_W_REF, 0, 0, 1.0);
         let (l, w) = boxes[3];
         assert_eq!(v.click_tab(l + w / 2.0, y), Some(3));
         assert_eq!(v.active_tab, 3);
@@ -1462,9 +1884,9 @@ mod tests {
             })
             .find(|(r, _, _)| (r.h - TAB_H).abs() < 1e-3)
             .expect("selected tab must draw a pill");
-        assert_eq!(pill.1, Rgba::rgba(1.0, 1.0, 1.0, 0.16));
+        assert_eq!(pill.1, Rgba::rgba(1.0, 1.0, 1.0, 0.22));
         assert!((pill.2.top_left - TAB_RADIUS).abs() < 1e-4);
-        let (l, w) = tab_boxes(PANEL_W_REF)[2];
+        let (l, w) = tab_boxes(PANEL_W_REF, 2, 2, 1.0)[2];
         assert!((pill.0.x - l).abs() < 1e-3 && (pill.0.w - w).abs() < 1e-3);
     }
 
@@ -1489,8 +1911,8 @@ mod tests {
             })
             .collect();
         assert_eq!(fills.len(), 2, "selected + hovered");
-        assert!(fills.contains(&Rgba::rgba(1.0, 1.0, 1.0, 0.16)), "selected");
-        assert!(fills.contains(&Rgba::rgba(1.0, 1.0, 1.0, 0.06)), "hovered");
+        assert!(fills.contains(&Rgba::rgba(1.0, 1.0, 1.0, 0.22)), "selected");
+        assert!(fills.contains(&Rgba::rgba(1.0, 1.0, 1.0, 0.08)), "hovered");
     }
 
     #[test]
@@ -1508,9 +1930,12 @@ mod tests {
     #[test]
     fn every_tab_label_is_still_drawn_once() {
         let f = build(&view(0, None));
-        for label in TABS {
+        // NotchStar's dock: an idle tab is icon-only, and exactly one label —
+        // the selected tab's — is on screen at a time.
+        for (i, label) in TABS.iter().enumerate() {
             let n = texts(&f).into_iter().filter(|(t, _, _)| t == label).count();
-            assert_eq!(n, 1, "tab {label} drawn exactly once");
+            let want = usize::from(i == 0);
+            assert_eq!(n, want, "tab {label} drawn {n} times, wanted {want}");
         }
     }
 
@@ -1538,19 +1963,35 @@ mod tests {
             .map(|(_, r, s)| (r, s))
     }
 
+    /// The tab boxes exactly as the strip lays them out for the default view
+    /// (tab 0 selected and settled), asserted against the icons actually drawn
+    /// so the geometry can never drift from the frame.
     fn glyph_rects(f: &Frame) -> Vec<Rect> {
-        // Tab boxes are the measured label rects (inset by TAB_PAD) widened back
-        // to the full pill rect, in x order.
-        let mut rects: Vec<Rect> = TABS
-            .iter()
-            .filter_map(|label| find_text(f, label).map(|(r, _)| r))
+        let icons: Vec<Rect> = all_nodes(f)
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::Glyph { rect, .. } if (rect.w - TAB_ICON).abs() < 1e-3 => Some(rect),
+                _ => None,
+            })
             .collect();
-        rects.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
-        rects.iter_mut().for_each(|r| {
-            r.x -= TAB_PAD;
-            r.w += TAB_PAD * 2.0;
-        });
-        rects
+        let boxes = tab_boxes(PANEL_W_REF, 0, 0, 1.0);
+        assert_eq!(
+            icons.len(),
+            boxes.len(),
+            "one icon per tab: {:#?}",
+            f.scene.nodes
+        );
+        // Each icon sits TAB_PAD inside its box, level in the strip's band.
+        for (icon, (left, _)) in icons.iter().zip(&boxes) {
+            assert!(
+                (icon.x - (left + TAB_PAD)).abs() < 1e-3,
+                "icon {icon:?} is not TAB_PAD inside box at {left}"
+            );
+        }
+        boxes
+            .into_iter()
+            .map(|(x, w)| Rect::new(x, icons[0].y, w, icons[0].h))
+            .collect()
     }
 
     /// The content rows: the rounded rects that span the panel's inner width.
@@ -1742,26 +2183,23 @@ mod tests {
     fn panel_frame_contains_header_title_in_reference_style() {
         let f = panel();
         let (rect, style) = find_text(&f, APP_TITLE).expect("panel must contain the header title");
-        assert_eq!(style.size, 20.0, "title is 20 px");
+        assert_eq!(style.size, 12.0, "title is 12 px");
         assert_eq!(style.weight, Weight::Semibold, "title is semibold");
         assert_eq!(style.color, Rgba::WHITE, "title is white");
         assert!((rect.y - HEADER_Y).abs() < 1e-4, "header row sits at y=16");
         assert!((rect.x - PANEL_PAD).abs() < 1e-4, "header is left-aligned");
     }
 
-    #[test]
-    fn panel_frame_contains_footer_clock_with_tabular_numerals() {
+#[test]
+    fn panel_has_no_placeholder_footer_clock() {
+        // The footer used to print a hardcoded "00:00" that never updated,
+        // which looked like a stuck clock. The footer is gone; nothing in
+        // the panel should contain that placeholder string.
         let f = panel();
-        let (rect, style) =
-            find_text(&f, FOOTER_CLOCK).expect("panel must contain the footer clock");
-        assert!(style.tabular, "the clock must use tabular figures");
-        assert_eq!(style.size, 12.0);
-        assert!((rect.x - PANEL_PAD).abs() < 1e-4, "footer is bottom-left");
         assert!(
-            (rect.max_y() - (PANEL_H_REF - FOOTER_BOTTOM_PAD)).abs() < 1e-4,
-            "footer is {FOOTER_BOTTOM_PAD} px off the bottom edge: {rect:?}"
+            find_text(&f, "00:00").is_none(),
+            "placeholder footer clock must not be drawn"
         );
-        assert!((rect.w - measure(FOOTER_CLOCK, &style)).abs() < 1e-4);
     }
 
     #[test]
@@ -1781,7 +2219,7 @@ mod tests {
                 "gap must be 8 px: {w:?}"
             );
         }
-        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * 5.0;
+        let used: f32 = rects.iter().map(|r| r.w).sum::<f32>() + TAB_GAP * (TABS.len() - 1) as f32;
         assert!(
             used <= PANEL_W_REF - PANEL_PAD * 2.0 + 1e-3,
             "tab row overflows the padded frame: {used}"
@@ -1791,13 +2229,23 @@ mod tests {
     #[test]
     fn tab_strip_is_centered() {
         let rects = glyph_rects(&panel());
+        // Only the selected tab shows a label, so the natural widths are the
+        // same ones the strip itself computes.
         let natural: Vec<f32> = TABS
             .iter()
-            .map(|label| measure(label, &TAB_LABEL) + TAB_PAD * 2.0 + TAB_SLACK)
+            .enumerate()
+            .map(|(i, label)| {
+                let base = TAB_PAD * 2.0 + TAB_ICON;
+                if i == 0 {
+                    base + TAB_ICON_GAP + measure(label, &TAB_LABEL) + TAB_SLACK
+                } else {
+                    base
+                }
+            })
             .collect();
         let avail = PANEL_W_REF - PANEL_PAD * 2.0;
         let boxes = layout::row_items(&natural, TAB_GAP, avail);
-        // glyph_rects widens each label rect back out by TAB_PAD, so the
+        // glyph_rects widens each icon rect back out by TAB_PAD, so the
         // widened rect's x IS the box's left edge.
         let want_left = PANEL_PAD + boxes[0].0;
         assert!(
@@ -1810,13 +2258,12 @@ mod tests {
     #[test]
     fn tab_labels_are_measured_not_guessed() {
         let f = panel();
-        for label in TABS {
-            let (rect, _) =
-                find_text(&f, label).unwrap_or_else(|| panic!("missing tab label {label}"));
+        // Only the selected tab draws its label, so only that one is measurable.
+        for label in ["Media"] {
+            let (rect, _) = find_text(&f, label)
+                .unwrap_or_else(|| panic!("missing tab label {label}"));
             let want = measure(label, &TAB_LABEL);
             assert!(want > 0.0, "{label} measured zero width");
-            // Measured, plus the slack that keeps DirectWrite's slightly wider
-            // real advances from being trimmed away.
             assert!((rect.w - want - TAB_SLACK).abs() < 1e-4, "{label}: {rect:?}");
         }
     }
@@ -1828,10 +2275,56 @@ mod tests {
     /// exactly what the open panel showed while the row still had 78 px spare.
     #[test]
     fn every_tab_label_fits_its_box_with_slack_to_spare() {
-        for (label, (_, w)) in TABS.iter().zip(&tab_boxes(PANEL_W_REF)) {
+        let w = tab_boxes(PANEL_W_REF, 0, 0, 1.0)[0].1;
+        let label = TABS[0];
+        assert!(
+            w - TAB_PAD * 2.0 >= measure(label, &TAB_LABEL) + TAB_SLACK - 1e-4,
+            "{label}: box {w} leaves no room for the real run"
+        );
+    }
+
+    /// The header's corner icons exist, sit at the top-right of the panel, and
+    /// stay inside the frame at every size.
+    #[test]
+    fn corner_icons_are_drawn_top_right_inside_the_frame() {
+        for (w, h) in [
+            (PANEL_W_REF, PANEL_H_REF),
+            (width_at(0.5), height_at(0.5)),
+            (width_at(1.0), height_at(1.0)),
+        ] {
+            let v = view_sized(w, h);
+            let f = build(&v);
+            let mut found: Vec<(&str, Rect)> = Vec::new();
+            for n in &f.scene.nodes {
+                if let Node::Glyph { name, rect, .. } = n {
+                    if *name == "pin" || *name == "settings" {
+                        found.push((name, *rect));
+                    }
+                }
+            }
+            assert_eq!(found.len(), 2, "{w}x{h}: expected pin + settings, got {found:?}");
+            let (pin, settings) = found.iter().fold((None, None), |(p, s), (n, r)| {
+                if *n == "pin" {
+                    (Some(*r), s)
+                } else {
+                    (p, Some(*r))
+                }
+            });
+            let (pin, settings) = (pin.unwrap(), settings.unwrap());
+            // Right-aligned inside the panel padding.
             assert!(
-                *w - TAB_PAD * 2.0 >= measure(label, &TAB_LABEL) + TAB_SLACK - 1e-4,
-                "{label}: box {w} leaves no room for the real run"
+                settings.max_x() <= w - PANEL_PAD + layout::BOUNDS_EPSILON,
+                "{w}x{h}: settings escapes right: {settings:?}"
+            );
+            assert!(
+                settings.max_x() > pin.max_x(),
+                "{w}x{h}: settings must sit right of the pin"
+            );
+            // On the header line, not floating above or below it.
+            let top = HEADER_Y + (header_height() - CORNER_ICON) * 0.5;
+            assert!(
+                (pin.y - top).abs() < 1.0 && (settings.y - top).abs() < 1.0,
+                "{w}x{h}: icons off the header line: pin={pin:?} settings={settings:?}"
             );
         }
     }
@@ -1841,6 +2334,57 @@ mod tests {
     /// that was missing when "some texts were not being shortened at all, they
     /// went outside the box": only the default tab's panel was bounds-checked,
     /// so an escaping rect on any other tab shipped silently. Also note that
+    /// The notification banner's text rects carry `NOTIF_SLACK` over the
+    /// measured run, so the renderer's larger real advance cannot ellipsize
+    /// its own text (the bug the "Arc" title had before `HEADER_SLACK`).
+    #[test]
+    fn notification_banner_rects_carry_slack() {
+        let app = "Outlook".to_string();
+        let title = "Design review".to_string();
+        let body = "Arc notch dock is ready".to_string();
+        let nodes = pill_hud(
+            PILL_W_REF,
+            PILL_H_REF,
+            &crate::app::hud::Hud::Notification {
+                app: app.clone(),
+                title: title.clone(),
+                body: body.clone(),
+            },
+            1.0,
+        );
+        assert!(!nodes.is_empty(), "a notification must emit nodes");
+        let style = TextStyle::numeric(9.5);
+        let head = format!("{} \u{b7} {}", app, title);
+        let head_w = measure(&head, &style);
+        let body_w = measure(&body, &style);
+        let texts: Vec<(String, Rect)> = nodes
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::Text { text, rect, .. } => Some((text, rect)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 2, "one head line and one body line");
+        assert!(
+            texts.iter().any(|(t, _)| *t == head),
+            "head line missing: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|(t, _)| *t == body),
+            "body line missing: {texts:?}"
+        );
+        // Slack: at least 8 px over the approximator, still inside the frame.
+        for (t, r) in &texts {
+            let want = if *t == head { head_w } else { body_w };
+            assert!(
+                r.w >= want + 8.0,
+                "rect not slack: {t:?} w={} measured={want}",
+                r.w
+            );
+            assert!(r.x >= 0.0 && r.max_x() <= PILL_W_REF + EPS, "{t:?} escapes");
+        }
+    }
+
     /// `assert_in_bounds` here is over the *frame*, not just the body.
     #[test]
     fn every_tab_keeps_every_text_inside_its_frame() {
@@ -1874,10 +2418,9 @@ mod tests {
     /// directly instead of looking up "the placeholder tab" by index.
     fn placeholder_rows() -> Vec<Node> {
         let v = view_sized(PANEL_W_REF, PANEL_H_REF);
-        // Match what `build` measures for the real tab strip.
-        let tabs = tab_strip(PANEL_W_REF, PANEL_H_REF, header_height(), &v);
-        let bottom = tabs.iter().map(|n| n.rect().max_y()).fold(0.0f32, f32::max);
-        content_rows(PANEL_W_REF, PANEL_H_REF, bottom, &v)
+        // The dock lives at the FOOT, so the rows start under the header —
+        // `row_band_top`, the same anchor `build` uses.
+        content_rows(PANEL_W_REF, PANEL_H_REF, row_band_top(), &v)
     }
 
     /// The placeholder rows laid out inside a full built frame, so the
@@ -1923,18 +2466,20 @@ mod tests {
     }
 
     #[test]
-    fn content_sits_between_the_tab_strip_and_the_footer() {
+    fn content_sits_between_the_tab_strip_and_the_panel_bottom() {
         let f = placeholder_panel();
         let tabs_bottom = glyph_rects(&f)
             .iter()
             .map(|r| r.max_y())
             .fold(0.0f32, f32::max);
-        let (footer, _) = find_text(&f, FOOTER_CLOCK).expect("footer");
+        // The footer clock is gone, so the lower bound is the panel edge
+        // itself (FOOTER_BOTTOM_PAD of slack).
+        let bottom = PANEL_H_REF - FOOTER_BOTTOM_PAD;
         for r in row_rects(&f) {
             assert!(r.y >= tabs_bottom - 1e-3, "row overlaps the tabs: {r:?}");
             assert!(
-                r.max_y() <= footer.y + 1e-3,
-                "row overlaps the footer: {r:?}"
+                r.max_y() <= bottom + 1e-3,
+                "row overlaps the footer band: {r:?}"
             );
         }
     }
@@ -2169,11 +2714,18 @@ mod tests {
     }
 
     #[test]
-    fn header_box_is_exactly_the_measured_run() {
+    fn header_box_leaves_room_past_the_measured_run() {
+        // Sizing this box to exactly `measure()` clipped the title to `A…`:
+        // the pure approximator under-reports DirectWrite's real advance by a
+        // fraction of a px, and the renderer trims whatever does not fit.
         let mut style = TextStyle::title();
         style.align = Align::Start;
         let (rect, _) = find_text(&panel(), APP_TITLE).unwrap();
-        assert!((rect.w - measure(APP_TITLE, &style)).abs() < 1e-4);
+        assert!(
+            rect.w >= measure(APP_TITLE, &style) + HEADER_SLACK - 1e-4,
+            "header box {} must clear the measured run by {HEADER_SLACK}",
+            rect.w
+        );
     }
 
     #[test]
@@ -2342,6 +2894,67 @@ mod tests {
         swap.swap_to();
         assert_eq!(swap.outgoing_opacity(), 1.0, "restart re-arms the fade");
         assert!(swap.rise() <= mid, "restart pulls the rise back to 0");
+    }
+
+    /// The chrome must ride out a tab swap untouched: the header (title, corner
+    /// icons) holds its exact rect, and the dock holds its LINE — its items may
+    /// glide sideways (the selected pill widens and the label reveals, which is
+    /// the NotchStar behaviour we want) but never rise with the body.
+    #[test]
+    fn chrome_holds_still_during_a_tab_swap() {
+        let mut v = view(0, None);
+        v.active_tab = 1;
+        v.tab_swap.swap_to();
+        v.tab_swap.step(1.0 / 120.0);
+        let mid = build(&v);
+
+        let mut settled = v.clone();
+        settled.tab_swap = TabSwap::default();
+        let rest = build(&settled);
+
+        let dock_line = dock_top(PANEL_H_REF);
+        let header_line = HEADER_Y + header_height();
+        let pick = |f: &Frame, header: bool| -> Vec<Rect> {
+            all_nodes(f)
+                .into_iter()
+                .map(|n| n.rect())
+                .filter(|r| {
+                    // Deliberately the OUTER bands only: everything between
+                    // header_line and dock_line is body, and body is the part
+                    // a swap is supposed to animate.
+                    if header {
+                        r.max_y() <= header_line
+                    } else {
+                        r.y >= dock_line
+                    }
+                })
+                .collect()
+        };
+
+        for header in [true, false] {
+            let (a, b) = (pick(&mid, header), pick(&rest, header));
+            // The dock legitimately holds MORE nodes mid-swap: both the outgoing
+            // and the incoming label are partly revealed. The header must not.
+            if header {
+                assert_eq!(a.len(), b.len(), "header node count changed mid-swap");
+            }
+            // Nothing in either band may drift vertically, ever.
+            let ys = |v: &[Rect]| -> Vec<i32> {
+                let mut out: Vec<i32> = v.iter().map(|r| (r.y * 100.0) as i32).collect();
+                out.sort_unstable();
+                out.dedup();
+                out
+            };
+            assert_eq!(ys(&a), ys(&b), "chrome rose with the body (header={header})");
+            if header {
+                for (ra, rb) in a.iter().zip(&b) {
+                    assert!(
+                        (ra.x - rb.x).abs() < 1e-3,
+                        "header slid sideways mid-swap: {ra:?} -> {rb:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

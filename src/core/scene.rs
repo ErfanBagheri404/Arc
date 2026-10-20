@@ -66,19 +66,19 @@ impl Default for TextStyle {
 }
 
 impl TextStyle {
-    /// Title style: 20px semibold white, per the reference design's media header.
+    /// Title style: 12px semibold white, per the reference design's media header.
     pub fn title() -> Self {
         Self {
-            size: 20.0,
+            size: 12.0,
             weight: Weight::Semibold,
             ..Default::default()
         }
     }
 
-    /// Subtitle style: 16px regular, tinted with the album-art accent.
+    /// Subtitle style: 11px regular, tinted with the album-art accent.
     pub fn subtitle(accent: Rgba) -> Self {
         Self {
-            size: 16.0,
+            size: 11.0,
             weight: Weight::Regular,
             color: accent,
             ..Default::default()
@@ -140,6 +140,18 @@ pub enum Node {
         fill: Rgba,
         radii: CornerRadii,
     },
+    /// A progress ring: an elliptical band hugging `rect`, filled from the top
+    /// clockwise to `progress`. The Dynamic-Island style indicator that rings
+    /// the collapsed pill.
+    Arc {
+        rect: Rect,
+        /// 0.0..=1.0
+        progress: f32,
+        track: Rgba,
+        fill: Rgba,
+        /// Band thickness in px.
+        thickness: f32,
+    },
     /// Inline vector glyph, identified by name so art stays data-driven.
     Glyph {
         rect: Rect,
@@ -158,6 +170,7 @@ impl Node {
             | Node::Image { rect, .. }
             | Node::Sprite { rect, .. }
             | Node::Bar { rect, .. }
+            | Node::Arc { rect, .. }
             | Node::Glyph { rect, .. }
             | Node::Group { rect, .. } => *rect,
         }
@@ -185,6 +198,7 @@ impl Node {
             | Node::Image { rect, .. }
             | Node::Sprite { rect, .. }
             | Node::Bar { rect, .. }
+            | Node::Arc { rect, .. }
             | Node::Glyph { rect, .. }
             | Node::Group { rect, .. } => (rect.x, rect.y),
         };
@@ -195,6 +209,7 @@ impl Node {
             | Node::Image { rect, .. }
             | Node::Sprite { rect, .. }
             | Node::Bar { rect, .. }
+            | Node::Arc { rect, .. }
             | Node::Glyph { rect, .. }
             | Node::Group { rect, .. } => *rect = new,
         }
@@ -349,9 +364,9 @@ mod tests {
 
     #[test]
     fn text_styles_match_reference_spec() {
-        assert_eq!(TextStyle::title().size, 20.0);
+        assert_eq!(TextStyle::title().size, 12.0);
         assert_eq!(TextStyle::title().weight, Weight::Semibold);
-        assert_eq!(TextStyle::subtitle(Rgba::WHITE).size, 16.0);
+        assert_eq!(TextStyle::subtitle(Rgba::WHITE).size, 11.0);
         assert!(TextStyle::numeric(13.0).tabular);
     }
 

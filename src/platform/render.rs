@@ -102,6 +102,25 @@ fn color_key(color: &D2D1_COLOR_F) -> [u32; 4] {
     [color.r.to_bits(), color.g.to_bits(), color.b.to_bits(), color.a.to_bits()]
 }
 
+/// Identity of a filled outline: rect bits, radius bits, and a tag so a glyph
+/// and a squircle that happen to share a rect never collide in the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GeomKey([u32; 9]);
+
+fn geometry_key(rect: &Rect, radii: &CornerRadii, tag: u32) -> GeomKey {
+    GeomKey([
+        rect.x.to_bits(),
+        rect.y.to_bits(),
+        rect.w.to_bits(),
+        rect.h.to_bits(),
+        radii.top_left.to_bits(),
+        radii.top_right.to_bits(),
+        radii.bottom_right.to_bits(),
+        radii.bottom_left.to_bits(),
+        tag,
+    ])
+}
+
 fn premultiply(c: Rgba) -> D2D1_COLOR_F {
     let c = c.clamped();
     D2D1_COLOR_F {
@@ -277,10 +296,12 @@ pub struct Renderer {
     /// Animated fades mint new colours every frame, so the map is dropped
     /// wholesale once it grows past `64` rather than leaking.
     brushes: HashMap<[u32; 4], ID2D1SolidColorBrush>,
-    /// One geometry reused for every filled path in a frame. `Open` discards
-    /// the geometry's previous contents, so the outline is rebuilt into this
-    /// instead of allocating a fresh COM object for each node.
-    scratch_path: Option<ID2D1PathGeometry>,
+    /// Filled path geometries keyed by the exact shape that produced them. A
+    /// committed geometry cannot be re-`Open`ed, so the only way to avoid
+    /// rebuilding an unchanged outline every frame is to keep the finished
+    /// geometry and `FillGeometry` it directly. Animating shapes miss (correct,
+    /// they changed); every static node in the scene hits.
+    geom_cache: HashMap<GeomKey, ID2D1PathGeometry>,
     /// Scratch UTF-16 buffer for text runs: cleared per draw, never reallocated.
     scratch_utf16: Vec<u16>,
     probe: PerfProbe,
@@ -311,7 +332,7 @@ impl Renderer {
             wic: None,
             images: HashMap::new(),
             brushes: HashMap::new(),
-            scratch_path: None,
+            geom_cache: HashMap::new(),
             scratch_utf16: Vec::with_capacity(64),
             probe: PerfProbe::default(),
             degraded: true,
@@ -346,6 +367,7 @@ impl Renderer {
         self.dcomp = None;
         self.d2d_factory = None;
         self.formats.clear();
+        self.geom_cache.clear();
     }
 
     fn build_chain(&mut self) -> windows::core::Result<()> {
@@ -644,6 +666,13 @@ impl Renderer {
                 opacity,
             } => self.draw_sprite(target, *rect, *handle, *src, *opacity),
             Node::Glyph { rect, name, color } => self.fill_glyph(target, *rect, name, *color),
+            Node::Arc {
+                rect,
+                progress,
+                track,
+                fill,
+                thickness,
+            } => self.fill_arc(target, *rect, *progress, *track, *fill, *thickness),
             Node::Group { children, .. } => {
                 for child in children {
                     self.draw_node(target, child);
@@ -664,33 +693,57 @@ impl Renderer {
         let Some(brush) = self.brush(target, color) else {
             return;
         };
-        let Some(path) = self.scratch_geometry() else {
-            return;
-        };
-        let Ok(sink) = (unsafe { path.Open() }) else {
-            return;
+        let key = geometry_key(&rect, &CornerRadii::uniform(0.0), 1);
+        let path = if let Some(path) = self.cached_geometry(&key) {
+            path
+        } else {
+            let Some(path) = self.new_geometry() else {
+                return;
+            };
+            let Ok(sink) = (unsafe { path.Open() }) else {
+                return;
+            };
+            unsafe {
+                sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+                for tri in &tris {
+                    sink.BeginFigure(p2(tri[0]), D2D1_FIGURE_BEGIN_FILLED);
+                    sink.AddLine(p2(tri[1]));
+                    sink.AddLine(p2(tri[2]));
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                }
+                if sink.Close().is_err() {
+                    return;
+                }
+            }
+            self.cache_geometry(key, &path);
+            path
         };
         unsafe {
-            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
-            for tri in &tris {
-                sink.BeginFigure(p2(tri[0]), D2D1_FIGURE_BEGIN_FILLED);
-                sink.AddLine(p2(tri[1]));
-                sink.AddLine(p2(tri[2]));
-                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            }
-            if sink.Close().is_err() {
-                return;
-            }
             target.FillGeometry(&path, &brush, None);
         }
     }
 
-    fn scratch_geometry(&mut self) -> Option<ID2D1PathGeometry> {
-        if self.scratch_path.is_none() {
-            let factory = self.d2d_factory.clone()?;
-            self.scratch_path = (unsafe { factory.CreatePathGeometry() }).ok();
+    /// A finished geometry for `key`, or `None` on a miss (caller builds it).
+    ///
+    /// A cache hit is already committed, so callers must `FillGeometry` it
+    /// *without* `Open`ing it — re-opening a committed geometry is the E_INVALIDARG
+    /// that made the pill vanish after its first frame.
+    fn cached_geometry(&self, key: &GeomKey) -> Option<ID2D1PathGeometry> {
+        self.geom_cache.get(key).cloned()
+    }
+
+    fn new_geometry(&mut self) -> Option<ID2D1PathGeometry> {
+        let factory = self.d2d_factory.clone()?;
+        unsafe { factory.CreatePathGeometry() }.ok()
+    }
+
+    /// Store a freshly built geometry. Dropped wholesale past the cap so an
+    /// endlessly animating scene cannot grow the map without bound.
+    fn cache_geometry(&mut self, key: GeomKey, path: &ID2D1PathGeometry) {
+        if self.geom_cache.len() >= 128 {
+            self.geom_cache.clear();
         }
-        self.scratch_path.clone()
+        self.geom_cache.insert(key, path.clone());
     }
 
     fn fill_squircle(
@@ -706,37 +759,121 @@ impl Renderer {
         let Some(brush) = self.brush(target, color) else {
             return;
         };
-        let Some(path) = self.scratch_geometry() else {
-            return;
-        };
-        let Ok(sink) = (unsafe { path.Open() }) else {
-            return;
-        };
-        unsafe {
-            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
-            for step in outline_steps(&rect, radii) {
-                match step {
-                    OutlineStep::Begin(p) => sink.BeginFigure(point(p), D2D1_FIGURE_BEGIN_FILLED),
-                    OutlineStep::Line(p) => sink.AddLine(point(p)),
-                    OutlineStep::Bezier(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                        point1: point(c1),
-                        point2: point(c2),
-                        point3: point(to),
-                    }),
-                    OutlineStep::End => sink.EndFigure(D2D1_FIGURE_END_CLOSED),
+        let key = geometry_key(&rect, &radii, 0);
+        let path = if let Some(path) = self.cached_geometry(&key) {
+            path
+        } else {
+            let Some(path) = self.new_geometry() else {
+                return;
+            };
+            let Ok(sink) = (unsafe { path.Open() }) else {
+                return;
+            };
+            unsafe {
+                sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+                for step in outline_steps(&rect, radii) {
+                    match step {
+                        OutlineStep::Begin(p) => sink.BeginFigure(point(p), D2D1_FIGURE_BEGIN_FILLED),
+                        OutlineStep::Line(p) => sink.AddLine(point(p)),
+                        OutlineStep::Bezier(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                            point1: point(c1),
+                            point2: point(c2),
+                            point3: point(to),
+                        }),
+                        OutlineStep::End => sink.EndFigure(D2D1_FIGURE_END_CLOSED),
+                    }
+                }
+                if sink.Close().is_err() {
+                    return;
                 }
             }
-            if sink.Close().is_err() {
-                return;
-            }
-        }
+            self.cache_geometry(key, &path);
+            path
+        };
         unsafe { target.FillGeometry(&path, &brush, None) };
     }
 
+    /// Paint a progress ring: an elliptical band hugging `rect`, with a dark
+    /// track and a fill that runs from the top clockwise to `progress`.
+    fn fill_arc(
+        &mut self,
+        target: &ID2D1RenderTarget,
+        rect: Rect,
+        progress: f32,
+        track: Rgba,
+        fill: Rgba,
+        thickness: f32,
+    ) {
+        if rect.w <= 0.0 || rect.h <= 0.0 || thickness <= 0.0 {
+            return;
+        }
+        let cx = rect.x + rect.w * 0.5;
+        let cy = rect.y + rect.h * 0.5;
+        let rx = (rect.w * 0.5 - thickness * 0.5).max(0.0);
+        let ry = (rect.h * 0.5 - thickness * 0.5).max(0.0);
+        let outer_rx = rx + thickness * 0.5;
+        let outer_ry = ry + thickness * 0.5;
+        let inner_rx = (rx - thickness * 0.5).max(0.0);
+        let inner_ry = (ry - thickness * 0.5).max(0.0);
+        const SEGS: usize = 48;
+        // Track: full ring.
+        if track.a > 0.0 {
+            if let Some(brush) = self.brush(target, track) {
+                if let Some(path) = self.new_geometry() {
+                    if let Ok(sink) = unsafe { path.Open() } {
+                        unsafe {
+                            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+                            // outer clockwise 0..2π
+                            sink.BeginFigure(point((cx + outer_rx, cy)), D2D1_FIGURE_BEGIN_FILLED);
+                            for i in 1..=SEGS {
+                                let a = (i as f32 / SEGS as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                                // start at top (-π/2), go clockwise => increasing angle
+                                let th = -std::f32::consts::FRAC_PI_2 + (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+                                sink.AddLine(point((cx + outer_rx * th.cos(), cy + outer_ry * th.sin())));
+                            }
+                            // inner clockwise-back 2π..0
+                            for i in (0..=SEGS).rev() {
+                                let th = -std::f32::consts::FRAC_PI_2 + (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+                                sink.AddLine(point((cx + inner_rx * th.cos(), cy + inner_ry * th.sin())));
+                            }
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                        }
+                        unsafe { target.FillGeometry(&path, &brush, None) };
+                    }
+                }
+            }
+        }
+        let progress = clamp_progress(progress);
+        if progress <= 0.0 || fill.a <= 0.0 {
+            return;
+        }
+        // Fill: partial ring from top clockwise.
+        if let Some(brush) = self.brush(target, fill) {
+            if let Some(path) = self.new_geometry() {
+                if let Ok(sink) = unsafe { path.Open() } {
+                    unsafe {
+                        sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+                        let n = ((progress * SEGS as f32).round() as usize).clamp(1, SEGS);
+                        sink.BeginFigure(point((cx + outer_rx * (-std::f32::consts::FRAC_PI_2).cos(), cy + outer_ry * (-std::f32::consts::FRAC_PI_2).sin())), D2D1_FIGURE_BEGIN_FILLED);
+                        for i in 1..=n {
+                            let th = -std::f32::consts::FRAC_PI_2 + (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+                            sink.AddLine(point((cx + outer_rx * th.cos(), cy + outer_ry * th.sin())));
+                        }
+                        // inner back along the same span
+                        for i in (0..=n).rev() {
+                            let th = -std::f32::consts::FRAC_PI_2 + (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+                            sink.AddLine(point((cx + inner_rx * th.cos(), cy + inner_ry * th.sin())));
+                        }
+                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                        let _ = sink.Close();
+                    }
+                    unsafe { target.FillGeometry(&path, &brush, None) };
+                }
+            }
+        }
+    }
     /// Decode `bytes` into a 32bpp premultiplied WIC source, cached by `handle`.
-    ///
-    /// Returns `None` for an undecodable payload, and that verdict is cached too
-    /// so a bad image costs one decode attempt, not one per frame. The app
     /// initialises COM on the thread that calls `present`, so this does not.
     fn decoded(&mut self, handle: ImageHandle) -> Option<IWICFormatConverter> {
         if let Some(cached) = self.images.get(&handle) {
@@ -1176,6 +1313,59 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
     let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
     let (cx, cy) = (x + w * 0.5, y + h * 0.5);
     let s = w.min(h) * 0.5; // half-size of the glyph box
+    // Tab icons are defined on a 0..1 box.
+    let px = |nx: f32| x + w * nx;
+    let py = |ny: f32| y + h * ny;
+    // Line-art helpers: `seg` draws a thick stroke between two normalised
+    // points, `ring` strokes a circle. NotchStar's dock is monoline outline
+    // art, so the tab icons are built from strokes, not filled bars.
+    let seg = |v: &mut Vec<[[f32; 2]; 3]>, ax: f32, ay: f32, bx: f32, by: f32, sw: f32| {
+        // Clamp to the icon box: a stroke's half-width sticks out past its
+        // endpoints, and an icon whose ink escapes its rect paints over the
+        // neighbouring tab.
+        let (ax, ay) = (px(ax), py(ay));
+        let (bx, by) = (px(bx), py(by));
+        let dx = bx - ax;
+        let dy = by - ay;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-6 {
+            return;
+        }
+        let (nx, ny) = (-dy / len, dx / len);
+        let (hx, hy) = (nx * sw * 0.5, ny * sw * 0.5);
+        let clamp = |p: [f32; 2]| -> [f32; 2] {
+            [
+                p[0].clamp(x + 0.05, x + w - 0.05),
+                p[1].clamp(y + 0.05, y + h - 0.05),
+            ]
+        };
+        v.push([
+            clamp([ax + hx, ay + hy]),
+            clamp([bx + hx, by + hy]),
+            clamp([bx - hx, by - hy]),
+        ]);
+        v.push([
+            clamp([ax + hx, ay + hy]),
+            clamp([bx - hx, by - hy]),
+            clamp([ax - hx, ay - hy]),
+        ]);
+    };
+    let ring = |v: &mut Vec<[[f32; 2]; 3]>, cxn: f32, cyn: f32, r: f32, sw: f32, segs: usize| {
+        for i in 0..segs {
+            let a0 = (i as f32) * std::f32::consts::TAU / segs as f32;
+            let a1 = ((i + 1) as f32) * std::f32::consts::TAU / segs as f32;
+            seg(
+                v,
+                cxn + r * a0.cos(),
+                cyn + r * a0.sin(),
+                cxn + r * a1.cos(),
+                cyn + r * a1.sin(),
+                sw,
+            );
+        }
+    };
+    // Icon builders for the transport glyphs are inline below; the tab icons use
+    // the stroke helpers (`seg`/`ring`) above.
     let tris: Vec<[[f32; 2]; 3]> = match name {
         "play" => vec![[
             [cx - s * 0.5 + s * 0.15, cy - s * 0.72],
@@ -1183,25 +1373,27 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
             [cx + s * 0.72, cy],
         ]],
         "pause" => vec![
+            // left bar
             [
-                [cx - s * 0.45, cy - s * 0.72],
-                [cx - s * 0.45, cy + s * 0.72],
-                [cx - s * 0.02, cy + s * 0.72],
+                [cx - s * 0.38, cy - s * 0.72],
+                [cx - s * 0.38, cy + s * 0.72],
+                [cx - s * 0.10, cy + s * 0.72],
             ],
             [
-                [cx - s * 0.45, cy - s * 0.72],
-                [cx - s * 0.02, cy + s * 0.72],
-                [cx - s * 0.02, cy - s * 0.72],
+                [cx - s * 0.38, cy - s * 0.72],
+                [cx - s * 0.10, cy + s * 0.72],
+                [cx - s * 0.10, cy - s * 0.72],
+            ],
+            // right bar
+            [
+                [cx + s * 0.10, cy - s * 0.72],
+                [cx + s * 0.10, cy + s * 0.72],
+                [cx + s * 0.38, cy + s * 0.72],
             ],
             [
-                [cx + s * 0.02, cy - s * 0.72],
-                [cx + s * 0.02, cy + s * 0.72],
-                [cx + s * 0.45, cy + s * 0.72],
-            ],
-            [
-                [cx + s * 0.02, cy - s * 0.72],
-                [cx + s * 0.45, cy + s * 0.72],
-                [cx + s * 0.45, cy - s * 0.72],
+                [cx + s * 0.10, cy - s * 0.72],
+                [cx + s * 0.38, cy + s * 0.72],
+                [cx + s * 0.38, cy - s * 0.72],
             ],
         ],
         "prev" => vec![
@@ -1239,8 +1431,170 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
                 [cx - s * 0.62, cy + s * 0.72],
             ],
         ],
-        _ => return None,
-    };
+                // ── Tab icons. Glyph mapping follows the tab semantics; the stroke
+        //    ratio is 1.2 on a 16 px box ≈ 0.075 — close to NotchStar's
+        //    1.75 px on a 26 px box ≈ 0.067.
+            "note" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Music note: stem down from the head, flag curling right.
+                ring(&mut v, 0.36, 0.72, 0.18, sw, 14);
+                seg(&mut v, 0.52, 0.72, 0.52, 0.12, sw);
+                seg(&mut v, 0.52, 0.12, 0.86, 0.30, sw);
+                v
+            }
+            "chart" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Rising bars on a hairline baseline (NotchStar's "-stats").
+                seg(&mut v, 0.16, 0.94, 0.16, 0.52, sw);
+                seg(&mut v, 0.40, 0.94, 0.40, 0.32, sw);
+                seg(&mut v, 0.64, 0.94, 0.64, 0.12, sw);
+                seg(&mut v, 0.06, 0.94, 0.92, 0.94, sw);
+                v
+            }
+            "hourglass" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Hourglass: top + bottom rails, two lines crossing at the waist.
+                seg(&mut v, 0.16, 0.08, 0.84, 0.08, sw);
+                seg(&mut v, 0.16, 0.08, 0.50, 0.50, sw);
+                seg(&mut v, 0.84, 0.08, 0.50, 0.50, sw);
+                seg(&mut v, 0.16, 0.92, 0.50, 0.50, sw);
+                seg(&mut v, 0.84, 0.92, 0.50, 0.50, sw);
+                seg(&mut v, 0.16, 0.92, 0.84, 0.92, sw);
+                v
+            }
+            "clipboard" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // NotchStar's "note/card": rounded rect + two text rows.
+                seg(&mut v, 0.20, 0.10, 0.80, 0.10, sw);
+                seg(&mut v, 0.80, 0.10, 0.80, 0.90, sw);
+                seg(&mut v, 0.80, 0.90, 0.20, 0.90, sw);
+                seg(&mut v, 0.20, 0.90, 0.20, 0.10, sw);
+                seg(&mut v, 0.32, 0.36, 0.68, 0.36, sw);
+                seg(&mut v, 0.32, 0.54, 0.68, 0.54, sw);
+                seg(&mut v, 0.32, 0.72, 0.68, 0.72, sw);
+                v
+            }
+            "drop" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Droplet: pointed top curving to a round bottom, mirrored.
+                let tip = (0.50, 0.08);
+                let left = (0.22, 0.56);
+                let right = (0.78, 0.56);
+                seg(&mut v, tip.0, tip.1, 0.30, 0.26, sw);
+                seg(&mut v, 0.30, 0.26, left.0, left.1, sw);
+                seg(&mut v, tip.0, tip.1, 0.70, 0.26, sw);
+                seg(&mut v, 0.70, 0.26, right.0, right.1, sw);
+                ring(&mut v, 0.50, 0.62, 0.36, sw, 14);
+                v
+            }
+            "bolt" => {
+                let sw = 1.25;
+                let mut v = Vec::new();
+                // Classic zig-zag zap.
+                let pts = [
+                    (0.60, 0.04),
+                    (0.22, 0.54),
+                    (0.46, 0.54),
+                    (0.40, 0.96),
+                    (0.78, 0.46),
+                    (0.54, 0.46),
+                ];
+                for i in 0..pts.len() {
+                    let a = pts[i];
+                    let b = pts[(i + 1) % pts.len()];
+                    seg(&mut v, a.0, a.1, b.0, b.1, sw);
+                }
+                v
+            }
+            "calendar" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Calendar: header rail + two hanging posts.
+                seg(&mut v, 0.10, 0.22, 0.90, 0.22, sw);
+                seg(&mut v, 0.90, 0.22, 0.90, 0.94, sw);
+                seg(&mut v, 0.90, 0.94, 0.10, 0.94, sw);
+                seg(&mut v, 0.10, 0.94, 0.10, 0.22, sw);
+                seg(&mut v, 0.30, 0.06, 0.30, 0.22, sw);
+                seg(&mut v, 0.70, 0.06, 0.70, 0.22, sw);
+                seg(&mut v, 0.10, 0.40, 0.90, 0.40, sw);
+                v
+            }
+            "tray" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Shelf: one rail with two blocks standing on it.
+                seg(&mut v, 0.08, 0.74, 0.92, 0.74, sw);
+                seg(&mut v, 0.18, 0.74, 0.18, 0.44, sw);
+                seg(&mut v, 0.18, 0.44, 0.40, 0.44, sw);
+                seg(&mut v, 0.40, 0.44, 0.40, 0.74, sw);
+                seg(&mut v, 0.54, 0.74, 0.54, 0.26, sw);
+                seg(&mut v, 0.54, 0.26, 0.82, 0.26, sw);
+                seg(&mut v, 0.82, 0.26, 0.82, 0.74, sw);
+                v
+            }
+            "terminal" => {
+                let sw = 1.15;
+                let mut v = Vec::new();
+                // Terminal: tray with a prompt `>` over a body line.
+                seg(&mut v, 0.08, 0.14, 0.92, 0.14, sw);
+                seg(&mut v, 0.92, 0.14, 0.92, 0.74, sw);
+                seg(&mut v, 0.92, 0.74, 0.08, 0.74, sw);
+                seg(&mut v, 0.08, 0.74, 0.08, 0.14, sw);
+                seg(&mut v, 0.22, 0.30, 0.46, 0.44, sw);
+                seg(&mut v, 0.22, 0.58, 0.46, 0.44, sw);
+                seg(&mut v, 0.54, 0.58, 0.78, 0.58, sw);
+                v
+            }
+            "settings" => {
+                // A cog, not two concentric circles: the reference's gear reads
+                // as a toothed wheel, so the teeth must break the outline. The
+                // hub is a small open ring so the glyph stays monoline.
+                let sw = 1.25;
+                let mut v = Vec::new();
+                ring(&mut v, 0.50, 0.50, 0.27, sw, 16);
+                ring(&mut v, 0.50, 0.50, 0.09, sw, 8);
+                for i in 0..8 {
+                    let a = (i as f32) * std::f32::consts::TAU / 8.0;
+                    let (c, s) = (a.cos(), a.sin());
+                    seg(
+                        &mut v,
+                        0.5 + 0.25 * c,
+                        0.5 + 0.25 * s,
+                        0.5 + 0.40 * c,
+                        0.5 + 0.40 * s,
+                        sw,
+                    );
+                }
+                v
+            }
+            "pin" => {
+                // A pushpin / thumbtack: a narrow cap on top of flared
+                // shoulders that taper to a point. The shoulders are wider than
+                // the cap so the silhouette reads as a thumbtack, not as a
+                // location marker (circle + triangle) or a slider.
+                let sw = 1.25;
+                let mut v = Vec::new();
+                // cap
+                seg(&mut v, 0.34, 0.14, 0.66, 0.14, sw);
+                seg(&mut v, 0.34, 0.14, 0.34, 0.26, sw);
+                seg(&mut v, 0.66, 0.14, 0.66, 0.26, sw);
+                seg(&mut v, 0.34, 0.26, 0.66, 0.26, sw);
+                // flared shoulders
+                seg(&mut v, 0.34, 0.26, 0.16, 0.46, sw);
+                seg(&mut v, 0.66, 0.26, 0.84, 0.46, sw);
+                seg(&mut v, 0.16, 0.46, 0.84, 0.46, sw);
+                // tapered point
+                seg(&mut v, 0.16, 0.46, 0.50, 0.90, sw);
+                seg(&mut v, 0.84, 0.46, 0.50, 0.90, sw);
+                v
+            }
+            _ => return None,
+        };
     Some(tris)
 }
 
@@ -1279,6 +1633,91 @@ mod tests {
             }
         }
         assert!(glyph_tris("seek", &rect).is_none());
+    }
+
+    /// The pause glyph must read as TWO bars. Its inner edges used to sit
+    /// 0.04·s apart (~0.4 px at 22 px), so the bars fused into one solid block
+    /// at every size. Assert a real gap between the left and right bar.
+    #[test]
+    fn pause_glyph_has_a_visible_gap_between_its_bars() {
+        let rect = Rect::new(100.0, 50.0, 22.0, 22.0);
+        let tris = glyph_tris("pause", &rect).expect("pause geometry");
+        let cx = rect.x + rect.w * 0.5;
+        let left_max = tris
+            .iter()
+            .flat_map(|t| t.iter())
+            .map(|p| p[0])
+            .filter(|x| *x < cx)
+            .fold(f32::MIN, f32::max);
+        let right_min = tris
+            .iter()
+            .flat_map(|t| t.iter())
+            .map(|p| p[0])
+            .filter(|x| *x > cx)
+            .fold(f32::MAX, f32::min);
+        let gap = right_min - left_max;
+        assert!(
+            gap >= 1.5,
+            "pause bars are {gap:.2} px apart at 22 px — they fuse into one block"
+        );
+    }
+
+    /// Every tab icon must be a non-empty set of triangles that stay inside
+    /// the rect they are drawn into, or a click paints over the neighbour.
+    #[test]
+    fn tab_icons_fit_their_rect() {
+        let rect = Rect::new(100.0, 50.0, 11.0, 11.0);
+        for name in [
+            "note", "chart", "hourglass", "clipboard", "drop", "bolt", "calendar", "tray",
+            "terminal",
+        ] {
+            let tris = glyph_tris(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
+            assert!(!tris.is_empty(), "{name} draws nothing");
+            for tri in &tris {
+                for &[px, py] in tri {
+                    assert!(
+                        (rect.x - 0.001..=rect.x + rect.w + 0.001).contains(&px)
+                            && (rect.y - 0.001..=rect.y + rect.h + 0.001).contains(&py),
+                        "{name} vertex ({px},{py}) escapes the tab rect {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The tab icons are MONOLINE art: strokes, not solid plates. Each must
+    /// still put real ink on the box — an empty or hairline glyph is an
+    /// invisible tab — and stay inside its rect.
+    #[test]
+    fn line_art_tab_icons_have_ink() {
+        let rect = Rect::new(0.0, 0.0, 14.0, 14.0);
+        for name in [
+            "note",
+            "chart",
+            "hourglass",
+            "clipboard",
+            "drop",
+            "bolt",
+            "calendar",
+            "tray",
+            "terminal",
+            "settings",
+            "pin",
+        ] {
+            let tris = glyph_tris(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
+            let area: f32 = tris
+                .iter()
+                .map(|t| {
+                    let (a, b, c) = (t[0], t[1], t[2]);
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() * 0.5
+                })
+                .sum();
+            let cover = area / (rect.w * rect.h);
+            assert!(
+                (0.04..0.75).contains(&cover),
+                "{name} covers {cover:.2} of its box — a monoline glyph should be stroke-thin but visible"
+            );
+        }
     }
 
     fn frame() -> Frame {

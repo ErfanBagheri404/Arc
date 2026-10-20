@@ -21,7 +21,7 @@ pub const EAR_W: f32 = 20.0;
 /// Collapsed pill height, mirrored from `app::state::PILL_H`.
 pub const PILL_H_REF: f32 = 32.0;
 /// Expanded panel height, mirrored from `app::state::PANEL_H`.
-pub const PANEL_H_REF: f32 = 200.0;
+pub const PANEL_H_REF: f32 = 248.0;
 
 /// Below this `openness` the panel content is not emitted at all. Emitting a
 /// zero-alpha node still costs a D2D push and a squircle tessellation, and during

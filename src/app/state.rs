@@ -14,7 +14,7 @@ pub const PILL_H: f32 = 32.0;
 /// `h / 2` gives a true semicircular bottom, the iOS hanging-pill look.
 pub const PILL_RADIUS: f32 = 16.0;
 pub const PANEL_RADIUS: f32 = 36.0;
-pub const PANEL_H: f32 = 200.0;
+pub const PANEL_H: f32 = 248.0;
 
 /// Dwell time before hover expands the island, in seconds (Phase 2, hover).
 /// Short enough to feel like a reaction, long enough not to fire on a mouse
@@ -115,6 +115,9 @@ pub struct IslandState {
     height: Spring,
     radius: Spring,
     hover: Hover,
+    /// Opened automatically by a playback start; survives cursor-leave and
+    /// collapses again when playback stops. Cleared on any explicit user action.
+    auto_expanded: bool,
 }
 
 impl IslandState {
@@ -127,6 +130,7 @@ impl IslandState {
             height: Spring::new(PILL_H, SpringConfig::OPEN),
             radius: Spring::new(PILL_RADIUS, SpringConfig::GENERIC),
             hover: Hover::new(),
+            auto_expanded: false,
         }
     }
 
@@ -146,10 +150,58 @@ impl IslandState {
         self.mode == WindowMode::Expanded
     }
 
+    /// True when the island is currently expanded because playback started.
+    pub fn auto_expanded(&self) -> bool {
+        self.auto_expanded
+    }
+
+    /// Auto-expand when a track starts playing. No-op if already expanded or
+    /// currently hidden by a fullscreen policy. Returns whether the mode changed.
+    pub fn open_for_playback(&mut self) -> bool {
+        if self.mode == WindowMode::Hidden || self.expanded() {
+            return false;
+        }
+        self.mode = WindowMode::Expanded;
+        self.auto_expanded = true;
+        self.retarget();
+        true
+    }
+
+    /// Collapse again once playback stops, but only if WE opened it. Returns
+    /// whether the mode changed.
+    pub fn close_after_playback(&mut self) -> bool {
+        if !self.auto_expanded || self.mode != WindowMode::Expanded {
+            return false;
+        }
+        self.auto_expanded = false;
+        self.mode = WindowMode::Collapsed;
+        self.retarget();
+        true
+    }
+
+    /// Open the panel because files were just dropped on the island
+    /// (NotchDrop's "the notch answers the drop" behaviour).
+    ///
+    /// A drop is a deliberate gesture aimed at the notch, so unlike hover it
+    /// opens immediately with no dwell. The panel is NOT marked
+    /// `auto_expanded`: a drop is a one-shot action, and the normal
+    /// cursor-leave rule should close it once the user moves away — parking a
+    /// file must not pin a panel over their desktop.
+    pub fn open_for_drop(&mut self) -> bool {
+        if self.mode == WindowMode::Hidden || self.expanded() {
+            return false;
+        }
+        self.auto_expanded = false;
+        self.mode = WindowMode::Expanded;
+        self.retarget();
+        true
+    }
+
     /// Flip between pill and panel. From `Hidden`, a toggle re-opens the pill
     /// (the panel was already dismissed), so the user never lands on a state
     /// they cannot see.
     pub fn toggle(&mut self) {
+        self.auto_expanded = false;
         self.mode = match self.mode {
             WindowMode::Expanded => WindowMode::Collapsed,
             _ => WindowMode::Expanded,
@@ -159,16 +211,32 @@ impl IslandState {
 
     /// Point the springs at the current mode's geometry. Springs are retargeted,
     /// never snapped, so every mode change is a morph.
+    ///
+    /// VNotch's staged morph: the height (the "drop") leads, the width (the
+    /// "spread") follows, the corner radius trails both. Collapse runs about
+    /// 2/3 of the expand duration (faster, critically damped) per the VNotch
+    /// frame analysis — the reference design's OPEN config was shared across
+    /// both directions, which left collapse as slow as expand.
     fn retarget(&mut self) {
+        let expanding = self.mode == WindowMode::Expanded;
         let (w, h, r) = match self.mode {
             WindowMode::Expanded => (PANEL_W, PANEL_H, PANEL_RADIUS),
             // `Hidden` keeps the pill's target: the window is hidden while the
             // springs settle, so when it comes back there is no jump.
             WindowMode::Collapsed | WindowMode::Hidden => (PILL_W, PILL_H, PILL_RADIUS),
         };
-        self.width.set_config(SpringConfig::OPEN);
-        self.height.set_config(SpringConfig::OPEN);
-        self.radius.set_config(SpringConfig::GENERIC);
+        if expanding {
+            // Height leads (drop), width follows (spread), radius trails.
+            self.width.set_config(SpringConfig::new(0.30, 0.9));
+            self.height.set_config(SpringConfig::OPEN);
+            self.radius.set_config(SpringConfig::GENERIC);
+        } else {
+            // Collapse: faster and critically damped (no overshoot on the way
+            // out), about 2/3 of the expand duration.
+            self.width.set_config(SpringConfig::new(0.20, 1.0));
+            self.height.set_config(SpringConfig::new(0.13, 1.0));
+            self.radius.set_config(SpringConfig::new(0.22, 1.0));
+        }
         self.width.set_target(w);
         self.height.set_target(h);
         self.radius.set_target(r);
@@ -258,7 +326,9 @@ impl IslandState {
         // Expanded is expanded, however it got there (hover, click, hotkey):
         // cursor off the body → collapse. This was the stuck-panel bug — a
         // click-opened panel was exempt and only the tray could close it.
-        if self.mode == WindowMode::Expanded && !pointer_over {
+        // Exception: an auto-expanded (playback) panel stays open even when
+        // the cursor leaves; it collapses again when playback stops.
+        if self.mode == WindowMode::Expanded && !pointer_over && !self.auto_expanded {
             self.hover.leave_expansion();
             self.mode = WindowMode::Collapsed;
             self.retarget();
@@ -579,5 +649,88 @@ mod tests {
             s.hover_step(true, 0.05);
         }
         assert!(s.hidden(), "hover must not un-hide the island");
+    }
+
+    #[test]
+    fn starting_playback_opens_the_island_and_ending_it_closes_it() {
+        let mut s = IslandState::collapsed();
+        assert!(s.open_for_playback(), "a track starting must expand the pill");
+        assert!(s.expanded());
+        assert!(s.auto_expanded());
+        // While auto-expanded, the cursor leaving the body must not collapse it.
+        for _ in 0..20 {
+            s.hover_step(false, 0.05);
+        }
+        assert!(s.expanded(), "an auto-opened panel survives a cursor-leave");
+        assert!(s.close_after_playback(), "playback ending must close it again");
+        assert!(!s.expanded());
+    }
+
+    #[test]
+    fn a_user_toggle_beats_the_playback_policy() {
+        let mut s = IslandState::collapsed();
+        assert!(s.open_for_playback());
+        s.toggle();
+        assert!(!s.expanded(), "the user collapsed it");
+        // Playback ending after a manual close must not re-open anything.
+        assert!(!s.close_after_playback());
+        assert!(!s.expanded());
+    }
+
+    #[test]
+    fn playback_never_opens_over_a_hidden_island() {
+        let mut s = IslandState::collapsed();
+        s.hide();
+        assert!(!s.open_for_playback(), "fullscreen video wins");
+        assert!(s.hidden());
+    }
+
+    /// VNotch's staged morph: the height (the drop) leads, the width (the
+    /// spread) follows. Both springs leave the pill together, so the one with
+    /// the slower config must be behind a few frames in.
+    #[test]
+    fn the_morph_stages_height_before_width() {
+        let mut s = IslandState::collapsed();
+        s.toggle();
+        for _ in 0..4 {
+            s.step_dt(1.0 / 60.0);
+        }
+        let hp = (s.logical_height() - PILL_H) / (PANEL_H - PILL_H);
+        let wp = (s.logical_width() - PILL_W) / (PANEL_W - PILL_W);
+        assert!(hp > wp, "height must lead: hp={hp} wp={wp}");
+    }
+
+    /// VNotch: collapse runs about 2/3 of the expand duration. Measured as
+    /// frames to within half a px of the target — the spring's own settle flag
+    /// scales its velocity threshold with ω₀, so a faster spring needs to be
+    /// moving *less* to count as settled and the frame counts are not
+    /// comparable across configs.
+    #[test]
+    fn collapse_is_faster_than_expand() {
+        fn frames_to(s: &mut IslandState, target: (f32, f32, f32)) -> u32 {
+            let near = |v: f32, t: f32| (v - t).abs() < 0.5;
+            let mut frames = 0;
+            while !(near(s.logical_width(), target.0)
+                && near(s.logical_height(), target.1)
+                && near(s.logical_radius(), target.2))
+            {
+                s.step_dt(1.0 / 60.0);
+                frames += 1;
+                assert!(frames < 2_000, "never converged");
+            }
+            frames
+        }
+        let mut open = IslandState::collapsed();
+        open.toggle();
+        let open_frames = frames_to(&mut open, (PANEL_W, PANEL_H, PANEL_RADIUS));
+        let mut closing = IslandState::collapsed();
+        closing.toggle();
+        frames_to(&mut closing, (PANEL_W, PANEL_H, PANEL_RADIUS));
+        closing.toggle();
+        let close_frames = frames_to(&mut closing, (PILL_W, PILL_H, PILL_RADIUS));
+        assert!(
+            close_frames < open_frames,
+            "collapse must be the faster morph: {close_frames} >= {open_frames}"
+        );
     }
 }
