@@ -853,6 +853,14 @@ impl Overlay {
         p.x >= l && p.x < r && p.y >= rect.top && p.y < bottom
     }
 
+    /// Live body size in physical px, for `ARC_DBG_LOOP` frame logs.
+    pub fn hover_width_px(&self) -> i32 {
+        self.hover_width_px
+    }
+    pub fn body_height(&self) -> i32 {
+        self.state.body_height
+    }
+
     /// Publish the live body's position/size inside the fixed frame.
     ///
     /// Sets the window *region* to exactly the body rect, so Windows itself

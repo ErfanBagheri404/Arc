@@ -183,7 +183,7 @@ pub fn content(fw: f32, fh: f32, top: f32, state: &MediaState, accent_progress: 
 /// The media block's real column: art row + one progress row + transport.
 /// Centring used to assume a taller estimate than this, which pushed the
 /// transport row past the footer.
-fn media_body_h() -> f32 {
+fn body_h() -> f32 {
     let clock_h = line_height(&TextStyle::numeric(11.0));
     ART + TEXT_LEAD + clock_h.max(4.0) + TRANSPORT_LEAD + TRANSPORT
 }
@@ -196,7 +196,7 @@ fn media_body_h() -> f32 {
 /// row run off the panel's bottom edge, so the block hugs the top instead.
 fn body_top(fh: f32, top: f32) -> f32 {
     let band_bottom = (fh - crate::ui::FOOTER_BOTTOM_PAD).max(0.0);
-    let body_h = media_body_h();
+    let body_h = body_h();
     let centred = top + ((band_bottom - top - body_h).max(0.0) * 0.5);
     centred.min((band_bottom - body_h).max(top))
 }

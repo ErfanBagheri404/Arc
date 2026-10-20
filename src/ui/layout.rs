@@ -9,6 +9,11 @@ use crate::core::scene::Align;
 
 /// Collapsed pill width, mirrored from `app::state::PILL_W`.
 pub const PILL_W_REF: f32 = 185.0;
+/// Hover (peek) pill width, mirrored from `app::state::PEEK_W`. The peek state
+/// is a size, not an `openness` sample: `openness` on a 340x56 frame reads ~0.11
+/// because the height barely leaves `PILL_H_REF`, which would draw the peek
+/// contents at ~3% alpha. Peek fades on its own width ramp instead.
+pub const PEEK_W_REF: f32 = 260.0;
 /// Expanded panel width, mirrored from `app::state::PANEL_W`.
 pub const PANEL_W_REF: f32 = 640.0;
 /// Collapsed pill corner radius, mirrored from `app::state::PILL_RADIUS`.

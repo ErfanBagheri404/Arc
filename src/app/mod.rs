@@ -505,6 +505,10 @@ pub fn run() -> std::process::ExitCode {
     );
     view.island_width = state.logical_width();
     view.island_height = state.logical_height();
+    // The header pin mirrors the island's pinned/hidden user-vis state so
+    // the corner icon and the Ctrl+Shift+Z hotkey can never disagree.
+    view.pinned = state.user_vis() == crate::app::state::UserVis::Pinned;
+    view.peek = state.mode() == crate::app::state::WindowMode::Peek;
     let frame = ui::build(&view);
     renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x(), true);
 
@@ -519,6 +523,7 @@ pub fn run() -> std::process::ExitCode {
         // The header pin mirrors the island's pinned/hidden user-vis state so
         // the corner icon and the Ctrl+Shift+Z hotkey can never disagree.
         view.pinned = state.user_vis() == crate::app::state::UserVis::Pinned;
+        view.peek = state.mode() == crate::app::state::WindowMode::Peek;
         overlay.set_body(
             state.logical_width(),
             state.logical_height(),
@@ -1001,7 +1006,8 @@ pub fn run() -> std::process::ExitCode {
         // Hover is polled, not event-driven (the collapsed window is
         // click-through), so it has to be stepped even on frames where nothing
         // else woke us up. It only ever folds a panel whose cursor left.
-        let hover_changed = state.hover_step(overlay.pointer_over());
+        let po = overlay.pointer_over();
+        let hover_changed = state.hover_step(po);
         // The tab swap runs its own springs; while either is live the island
         // repaints so the crossfade/rise plays out.
         let swap_busy = view.tab_swap.step(dt.as_secs_f32());
@@ -1158,7 +1164,7 @@ pub fn run() -> std::process::ExitCode {
                 let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = writeln!(
                     f,
-                    "{} tid={} anim={} swap={} viz={} hover={} redraw={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={}",
+                    "{} tid={} anim={} swap={} viz={} hover={} redraw={} po={} mode={} lw={} lh={} hw={} bh={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={}",
                     now.elapsed().as_micros(),
                     tid,
                     animating,
@@ -1166,6 +1172,12 @@ pub fn run() -> std::process::ExitCode {
                     view.viz.debug_busy(),
                     hover_changed,
                     redraw,
+                    po,
+                    format!("{:?}", state.mode()),
+                    state.logical_width(),
+                    state.logical_height(),
+                    overlay.hover_width_px(),
+                    overlay.body_height(),
                     DBG_DRAW_US.load(std::sync::atomic::Ordering::Relaxed),
                     DBG_BUILD_US.load(std::sync::atomic::Ordering::Relaxed),
                     DBG_PRESENT_US.load(std::sync::atomic::Ordering::Relaxed),

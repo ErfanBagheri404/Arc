@@ -40,15 +40,15 @@ pub enum WindowMode {
     Expanded,
 }
 
-/// Peek geometry: the pill grown on hover. Same hanging-pill silhouette, a
-/// little taller and much wider so the resting glyph slot gains the room the
-/// now-playing row and the standing rows want. Height stays pill-domain, so
-/// `openness` (which takes the slower axis) never crosses the panel's
-/// fade-in threshold — the panel keeps quiet until a press.
-pub const PEEK_W: f32 = 320.0;
-pub const PEEK_H: f32 = 44.0;
-/// `h / 2`: the peek keeps the true semicircular bottom.
-pub const PEEK_RADIUS: f32 = PEEK_H / 2.0;
+/// Peek geometry: the minimized pill widened into the reference's hover pill —
+/// a SHORT, wide row (art + title + artist + hairline progress), not a card.
+/// A 460x160 box read as an oval/card, which is the complaint; the reference
+/// hover state is 220x40 at 1x, i.e. ~5.5:1, so the height stays near the
+/// collapsed pill's and only the width grows.
+pub const PEEK_W: f32 = 260.0;
+pub const PEEK_H: f32 = 56.0;
+/// Not `h / 2`: a capsule at this aspect ratio reads as an oval.
+pub const PEEK_RADIUS: f32 = 24.0;
 
 /// Island geometry + morph springs.
 pub struct IslandState {
