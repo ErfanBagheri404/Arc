@@ -184,6 +184,9 @@ struct State {
     /// the hit-test would accept the whole 200px frame column, so the
     /// transparent strip below the pill would silently eat desktop clicks.
     body_height: i32,
+    /// Live body top offset in client physical px (0 unless the peek pill is
+    /// detached from the screen top). Keeps the hit-test / region aligned.
+    body_offset_y: i32,
     /// Last region rect passed to `SetWindowRgn`; skips no-op OS calls.
     applied_rgn: (i32, i32, i32, i32),
 }
@@ -195,6 +198,7 @@ impl Default for State {
             body_inset: 0,
             body_width: 0,
             body_height: 0,
+            body_offset_y: 0,
             applied_rgn: (0, 0, 0, 0),
         }
     }
@@ -235,6 +239,12 @@ fn click_body_height(hwnd: HWND) -> i32 {
         .unwrap_or(0)
 }
 
+fn click_body_offset_y(hwnd: HWND) -> i32 {
+    unsafe { userdata(hwnd) }
+        .map(|s| s.body_offset_y)
+        .unwrap_or(0)
+}
+
 fn click_body_width(hwnd: HWND) -> i32 {
     // Mirrors `pointer_over`: the live body width, centred in the fixed frame.
     unsafe { userdata(hwnd) }.map(|s| s.body_width).unwrap_or(0)
@@ -255,8 +265,8 @@ fn client_origin(hwnd: HWND) -> (i32, i32) {
 /// Pure hit-test: is client point (`x`,`y`) inside the live body rect? The
 /// height bound matters: without it the transparent strip *below* the pill
 /// would swallow desktop clicks (the fixed frame is far taller than the pill).
-fn hit_body(x: i32, y: i32, inset: i32, width: i32, height: i32) -> bool {
-    x >= inset && x < inset + width && y >= 0 && y < height
+fn hit_body(x: i32, y: i32, inset: i32, width: i32, height: i32, offset_y: i32) -> bool {
+    x >= inset && x < inset + width && y >= offset_y && y < offset_y + height
 }
 
 /// `LPARAM`-packed client coordinates are a signed 16-bit pair.
@@ -548,6 +558,7 @@ unsafe extern "system" fn wnd_proc(
                 click_body_inset(hwnd),
                 click_body_width(hwnd).max(1),
                 click_body_height(hwnd).max(1),
+                click_body_offset_y(hwnd),
             );
             if inside_body {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -849,7 +860,8 @@ impl Overlay {
         // the user was aiming at near the notch.
         let inset = (rect.right - rect.left - self.hover_width_px.max(1)) / 2;
         let (l, r) = (rect.left + inset, rect.right - inset);
-        let bottom = rect.top + self.state.body_height.max(1);
+        let offset_y = self.state.body_offset_y.max(0);
+        let bottom = rect.top + offset_y + self.state.body_height.max(1);
         p.x >= l && p.x < r && p.y >= rect.top && p.y < bottom
     }
 
@@ -870,16 +882,17 @@ impl Overlay {
     /// desktop icons that live near the notch need. `WM_NCHITTEST` and
     /// `pointer_over` keep the same rect as a second line of defence; all
     /// three read the same `hit_body` helper so they cannot disagree.
-    pub fn set_body(&mut self, logical_w: f32, logical_h: f32, frame_w: f32) {
+    pub fn set_body(&mut self, logical_w: f32, logical_h: f32, frame_w: f32, offset_y: f32) {
         let width = self.dpi().snap(logical_w) as i32;
         self.hover_width_px = width.max(1);
         self.state.body_inset = ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
         self.state.body_width = width.max(0);
         self.state.body_height = self.dpi().snap(logical_h) as i32;
+        self.state.body_offset_y = self.dpi().snap_offset(offset_y);
         // Window coords (popup: client == window): body rect only.
         let l = self.state.body_inset;
-        let (r, b) = (l + self.state.body_width, self.state.body_height);
-        let (l, t) = (l, 0);
+        let t = self.state.body_offset_y.max(0);
+        let (r, b) = (l + self.state.body_width, t + self.state.body_height);
         if (l, t, r, b) != self.state.applied_rgn {
             self.state.applied_rgn = (l, t, r, b);
             // SAFETY: CreateRectRgn returns an owned HRGN; SetWindowRgn takes
@@ -1108,14 +1121,18 @@ mod tests {
 
     #[test]
     fn hit_body_covers_the_pill_only() {
-        // Body rect = inset 330, 231x40 inside the 850x250 fixed frame.
-        assert!(hit_body(330, 0, 330, 231, 40), "pill top-left corner");
-        assert!(hit_body(445, 39, 330, 231, 40), "pill bottom middle");
+        // Body rect = inset 330, 231x40 at top offset 0 in the 850x250 frame.
+        assert!(hit_body(330, 0, 330, 231, 40, 0), "pill top-left corner");
+        assert!(hit_body(445, 39, 330, 231, 40, 0), "pill bottom middle");
         // Ear margins and the strip below the pill must pass through, or the
         // invisible frame eats desktop clicks.
-        assert!(!hit_body(329, 20, 330, 231, 40), "left ear");
-        assert!(!hit_body(561, 20, 330, 231, 40), "right ear");
-        assert!(!hit_body(445, 40, 330, 231, 40), "below the pill");
+        assert!(!hit_body(329, 20, 330, 231, 40, 0), "left ear");
+        assert!(!hit_body(561, 20, 330, 231, 40, 0), "right ear");
+        assert!(!hit_body(445, 40, 330, 231, 40, 0), "below the pill");
+        // A detached (peek) body sits `offset_y` below the screen top.
+        assert!(hit_body(330, 8, 330, 231, 40, 8), "peek body top");
+        assert!(hit_body(445, 47, 330, 231, 40, 8), "peek body bottom");
+        assert!(!hit_body(445, 0, 330, 231, 40, 8), "gap above detached pill");
     }
 
     #[test]

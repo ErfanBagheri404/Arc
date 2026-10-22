@@ -509,8 +509,9 @@ pub fn run() -> std::process::ExitCode {
     // the corner icon and the Ctrl+Shift+Z hotkey can never disagree.
     view.pinned = state.user_vis() == crate::app::state::UserVis::Pinned;
     view.peek = state.mode() == crate::app::state::WindowMode::Peek;
+    view.peek_t = (state.body_offset_y() / crate::app::state::PEEK_DROP).clamp(0.0, 1.0);
     let frame = ui::build(&view);
-    renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x(), true);
+    renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x(), state.body_offset_y(), true);
 
     let mut last = Instant::now();
     loop {
@@ -524,10 +525,12 @@ pub fn run() -> std::process::ExitCode {
         // the corner icon and the Ctrl+Shift+Z hotkey can never disagree.
         view.pinned = state.user_vis() == crate::app::state::UserVis::Pinned;
         view.peek = state.mode() == crate::app::state::WindowMode::Peek;
+        view.peek_t = (state.body_offset_y() / crate::app::state::PEEK_DROP).clamp(0.0, 1.0);
         overlay.set_body(
             state.logical_width(),
             state.logical_height(),
             state.frame_width(),
+            state.body_offset_y(),
         );
 
         for event in overlay.pump_events() {
@@ -572,7 +575,7 @@ pub fn run() -> std::process::ExitCode {
                     // the transparent ear margins — they look like desktop and
                     // must behave like desktop.
                     let lx = x / scale - state.body_offset_x();
-                    let ly = y / scale;
+                    let ly = y / scale - state.body_offset_y();
                     if lx < 0.0 || lx > state.logical_width() {
                         continue;
                     }
@@ -694,7 +697,7 @@ pub fn run() -> std::process::ExitCode {
                     // the panel is interactive, so the frame-vs-body gap is the
                     // ear margin plus the collapsed-width centring).
                     let lx = x / scale - state.body_offset_x();
-                    let ly = y / scale;
+                    let ly = y / scale - state.body_offset_y();
                     let tab = view.tab_at(lx, ly);
                     let row = view.row_at(lx, ly);
                     if tab != view.hover_tab || row != view.hover_row {
@@ -1229,6 +1232,7 @@ pub fn run() -> std::process::ExitCode {
                 overlay.dpi().scale,
                 dt.as_secs_f32(),
                 state.body_offset_x(),
+                state.body_offset_y(),
                 animating,
             );
             let dbg_t3 = Instant::now();

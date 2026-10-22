@@ -534,7 +534,7 @@ impl Renderer {
     /// a fixed frame (see `app::run`), so the morphing island is *centred* by
     /// translating the scene instead of resizing the HWND — a `SetWindowPos` +
     /// `ResizeBuffers` every animating frame is what made the expand stutter.
-    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32, offset_x: f32, sync: bool) {
+    pub fn present(&mut self, frame: &Frame, scale: f32, dt: f32, offset_x: f32, offset_y: f32, sync: bool) {
         let _ = (
             DBG_ACQ_US.load(std::sync::atomic::Ordering::Relaxed),
             DBG_ENDDRAW_US.load(std::sync::atomic::Ordering::Relaxed),
@@ -574,10 +574,10 @@ impl Renderer {
         );
         let dbg_b0 = std::time::Instant::now();
         unsafe { target.BeginDraw() };
-        if offset_x != 0.0 {
+        if offset_x != 0.0 || offset_y != 0.0 {
             // The render target is DPI-scaled, so a translation in logical
             // units lands in device pixels without further conversion.
-            let _ = unsafe { target.SetTransform(&Matrix3x2::translation(offset_x, 0.0)) };
+            let _ = unsafe { target.SetTransform(&Matrix3x2::translation(offset_x, offset_y)) };
         }
         unsafe {
             // Transparent clear every frame: the body is drawn at alpha 1 and
@@ -1316,56 +1316,58 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
     // Tab icons are defined on a 0..1 box.
     let px = |nx: f32| x + w * nx;
     let py = |ny: f32| y + h * ny;
-    // Line-art helpers: `seg` draws a thick stroke between two normalised
-    // points, `ring` strokes a circle. NotchStar's dock is monoline outline
-    // art, so the tab icons are built from strokes, not filled bars.
-    let seg = |v: &mut Vec<[[f32; 2]; 3]>, ax: f32, ay: f32, bx: f32, by: f32, sw: f32| {
-        // Clamp to the icon box: a stroke's half-width sticks out past its
-        // endpoints, and an icon whose ink escapes its rect paints over the
-        // neighbouring tab.
-        let (ax, ay) = (px(ax), py(ay));
-        let (bx, by) = (px(bx), py(by));
+    // Monoline pen. A dock icon is a STROKE, not a pile of quads: round caps
+    // and round joins are what let 17 px line art read as an icon instead of as
+    // scribble, and one stroke weight across the set is what makes nine icons
+    // look like one family. `pen` strokes a polyline (open or closed) at `sw`
+    // px; `circle` strokes a circle through the same pen.
+    let dot = |v: &mut Vec<[[f32; 2]; 3]>, p: [f32; 2], r: f32| {
+        let c = [px(p[0]), py(p[1])];
+        let n = 10;
+        for k in 0..n {
+            let a0 = (k as f32) * std::f32::consts::TAU / n as f32;
+            let a1 = ((k + 1) as f32) * std::f32::consts::TAU / n as f32;
+            v.push([
+                c,
+                [c[0] + r * a0.cos(), c[1] + r * a0.sin()],
+                [c[0] + r * a1.cos(), c[1] + r * a1.sin()],
+            ]);
+        }
+    };
+    let line = |v: &mut Vec<[[f32; 2]; 3]>, a: [f32; 2], b: [f32; 2], sw: f32| {
+        let (ax, ay) = (px(a[0]), py(a[1]));
+        let (bx, by) = (px(b[0]), py(b[1]));
         let dx = bx - ax;
         let dy = by - ay;
         let len = (dx * dx + dy * dy).sqrt();
         if len < 1e-6 {
             return;
         }
-        let (nx, ny) = (-dy / len, dx / len);
-        let (hx, hy) = (nx * sw * 0.5, ny * sw * 0.5);
-        let clamp = |p: [f32; 2]| -> [f32; 2] {
-            [
-                p[0].clamp(x + 0.05, x + w - 0.05),
-                p[1].clamp(y + 0.05, y + h - 0.05),
-            ]
-        };
-        v.push([
-            clamp([ax + hx, ay + hy]),
-            clamp([bx + hx, by + hy]),
-            clamp([bx - hx, by - hy]),
-        ]);
-        v.push([
-            clamp([ax + hx, ay + hy]),
-            clamp([bx - hx, by - hy]),
-            clamp([ax - hx, ay - hy]),
-        ]);
+        let (hx, hy) = (-dy / len * sw * 0.5, dx / len * sw * 0.5);
+        v.push([[ax + hx, ay + hy], [bx + hx, by + hy], [bx - hx, by - hy]]);
+        v.push([[ax + hx, ay + hy], [bx - hx, by - hy], [ax - hx, ay - hy]]);
     };
-    let ring = |v: &mut Vec<[[f32; 2]; 3]>, cxn: f32, cyn: f32, r: f32, sw: f32, segs: usize| {
-        for i in 0..segs {
-            let a0 = (i as f32) * std::f32::consts::TAU / segs as f32;
-            let a1 = ((i + 1) as f32) * std::f32::consts::TAU / segs as f32;
-            seg(
-                v,
-                cxn + r * a0.cos(),
-                cyn + r * a0.sin(),
-                cxn + r * a1.cos(),
-                cyn + r * a1.sin(),
-                sw,
-            );
+    let pen = |v: &mut Vec<[[f32; 2]; 3]>, pts: &[[f32; 2]], closed: bool, sw: f32| {
+        let r = sw * 0.5;
+        for i in 0..pts.len() {
+            dot(v, pts[i], r);
+            if i + 1 < pts.len() {
+                line(v, pts[i], pts[i + 1], sw);
+            } else if closed {
+                line(v, pts[i], pts[0], sw);
+            }
         }
     };
-    // Icon builders for the transport glyphs are inline below; the tab icons use
-    // the stroke helpers (`seg`/`ring`) above.
+    let circle = |v: &mut Vec<[[f32; 2]; 3]>, cxn: f32, cyn: f32, r: f32, sw: f32| {
+        let n = 20;
+        let pts: Vec<[f32; 2]> = (0..n)
+            .map(|i| {
+                let a = (i as f32) * std::f32::consts::TAU / n as f32;
+                [cxn + r * a.cos(), cyn + r * a.sin()]
+            })
+            .collect();
+        pen(v, &pts, true, sw);
+    };
     let tris: Vec<[[f32; 2]; 3]> = match name {
         "play" => vec![[
             [cx - s * 0.5 + s * 0.15, cy - s * 0.72],
@@ -1431,168 +1433,183 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
                 [cx - s * 0.62, cy + s * 0.72],
             ],
         ],
-                // ── Tab icons. Glyph mapping follows the tab semantics; the stroke
-        //    ratio is 1.2 on a 16 px box ≈ 0.075 — close to NotchStar's
-        //    1.75 px on a 26 px box ≈ 0.067.
-            "note" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Music note: stem down from the head, flag curling right.
-                ring(&mut v, 0.36, 0.72, 0.18, sw, 14);
-                seg(&mut v, 0.52, 0.72, 0.52, 0.12, sw);
-                seg(&mut v, 0.52, 0.12, 0.86, 0.30, sw);
-                v
+        // Tab + corner icons. One stroke weight, round caps, geometry on the
+        // 24 px grid taken from Lucide's paths (music, bar-chart-3, hourglass,
+        // clipboard, droplet, zap, calendar, library, terminal, cog) — shapes
+        // already proven legible at 16-24 px, which the previous
+        // hand-approximated segments were not.
+        "note" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            circle(&mut v, 0.25, 0.75, 0.125, sw);
+            circle(&mut v, 0.75, 0.667, 0.125, sw);
+            pen(
+                &mut v,
+                &[[0.375, 0.75], [0.375, 0.208], [0.875, 0.125], [0.875, 0.667]],
+                false,
+                sw,
+            );
+            v
+        }
+        "chart" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            pen(&mut v, &[[0.125, 0.125], [0.125, 0.875], [0.875, 0.875]], false, sw);
+            pen(&mut v, &[[0.333, 0.708], [0.333, 0.583]], false, sw);
+            pen(&mut v, &[[0.542, 0.708], [0.542, 0.208]], false, sw);
+            pen(&mut v, &[[0.75, 0.708], [0.75, 0.375]], false, sw);
+            v
+        }
+        "hourglass" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            pen(&mut v, &[[0.167, 0.083], [0.833, 0.083]], false, sw);
+            pen(&mut v, &[[0.167, 0.917], [0.833, 0.917]], false, sw);
+            // The walls pinch toward a waist but do NOT meet: one shared vertex
+            // there round-joins into a blob at 17 px.
+            pen(&mut v, &[[0.208, 0.083], [0.5, 0.44], [0.208, 0.917]], false, sw);
+            pen(&mut v, &[[0.792, 0.083], [0.5, 0.56], [0.792, 0.917]], false, sw);
+            v
+        }
+        "clipboard" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            pen(
+                &mut v,
+                &[
+                    [0.333, 0.167],
+                    [0.167, 0.167],
+                    [0.167, 0.833],
+                    [0.25, 0.917],
+                    [0.75, 0.917],
+                    [0.833, 0.833],
+                    [0.833, 0.167],
+                    [0.667, 0.167],
+                ],
+                false,
+                sw,
+            );
+            pen(
+                &mut v,
+                &[
+                    [0.375, 0.083],
+                    [0.625, 0.083],
+                    [0.667, 0.125],
+                    [0.667, 0.25],
+                    [0.333, 0.25],
+                    [0.333, 0.125],
+                    [0.375, 0.083],
+                ],
+                false,
+                sw,
+            );
+            pen(&mut v, &[[0.333, 0.5], [0.667, 0.5]], false, sw);
+            pen(&mut v, &[[0.333, 0.708], [0.667, 0.708]], false, sw);
+            v
+        }
+        "drop" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            // A point on top, a round belly below: ONE closed pen path, not a
+            // triangle roof glued onto a full circle.
+            let mut pts = vec![[0.5, 0.083]];
+            for i in 0..=8 {
+                let a = (0.5 - (i as f32) / 8.0) * std::f32::consts::PI;
+                pts.push([0.5 + 0.29 * a.sin(), 0.583 + 0.29 * a.cos()]);
             }
-            "chart" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Rising bars on a hairline baseline (NotchStar's "-stats").
-                seg(&mut v, 0.16, 0.94, 0.16, 0.52, sw);
-                seg(&mut v, 0.40, 0.94, 0.40, 0.32, sw);
-                seg(&mut v, 0.64, 0.94, 0.64, 0.12, sw);
-                seg(&mut v, 0.06, 0.94, 0.92, 0.94, sw);
-                v
+            pen(&mut v, &pts, true, sw);
+            v
+        }
+        "bolt" => {
+            let sw = 1.2;
+            let mut v = Vec::new();
+            // Lucide's zap outline.
+            pen(
+                &mut v,
+                &[
+                    [0.542, 0.083],
+                    [0.125, 0.583],
+                    [0.5, 0.583],
+                    [0.458, 0.917],
+                    [0.875, 0.417],
+                    [0.5, 0.417],
+                ],
+                true,
+                sw,
+            );
+            v
+        }
+        "calendar" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            pen(
+                &mut v,
+                &[[0.125, 0.208], [0.875, 0.208], [0.875, 0.875], [0.125, 0.875]],
+                true,
+                sw,
+            );
+            pen(&mut v, &[[0.125, 0.375], [0.875, 0.375]], false, sw);
+            pen(&mut v, &[[0.333, 0.125], [0.333, 0.292]], false, sw);
+            pen(&mut v, &[[0.667, 0.125], [0.667, 0.292]], false, sw);
+            v
+        }
+        "tray" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            // Lucide's library: one leaning volume plus three upright ones.
+            // Two outlined boxes on a rail were unreadable at 17 px.
+            pen(&mut v, &[[0.667, 0.25], [0.833, 0.833]], false, sw);
+            pen(&mut v, &[[0.5, 0.25], [0.5, 0.833]], false, sw);
+            pen(&mut v, &[[0.333, 0.333], [0.333, 0.833]], false, sw);
+            pen(&mut v, &[[0.167, 0.167], [0.167, 0.833]], false, sw);
+            v
+        }
+        "terminal" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            // Lucide's terminal: a prompt and a rule. The old boxed version
+            // read as a window.
+            pen(&mut v, &[[0.167, 0.708], [0.417, 0.5], [0.167, 0.292]], false, sw);
+            pen(&mut v, &[[0.5, 0.792], [0.833, 0.792]], false, sw);
+            v
+        }
+        "settings" => {
+            let sw = 1.15;
+            let mut v = Vec::new();
+            // A cog is an OUTLINE whose teeth break the rim. Spokes on a ring
+            // read as a sun; a stroked 6-tooth polygon reads as a gear.
+            let teeth = 6;
+            let mut pts = Vec::new();
+            for i in 0..teeth * 2 {
+                let r = if i % 2 == 0 { 0.42 } else { 0.30 };
+                let a = (i as f32) * std::f32::consts::TAU / (teeth * 2) as f32;
+                pts.push([0.5 + r * a.cos(), 0.5 + r * a.sin()]);
             }
-            "hourglass" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Hourglass: top + bottom rails, two lines crossing at the waist.
-                seg(&mut v, 0.16, 0.08, 0.84, 0.08, sw);
-                seg(&mut v, 0.16, 0.08, 0.50, 0.50, sw);
-                seg(&mut v, 0.84, 0.08, 0.50, 0.50, sw);
-                seg(&mut v, 0.16, 0.92, 0.50, 0.50, sw);
-                seg(&mut v, 0.84, 0.92, 0.50, 0.50, sw);
-                seg(&mut v, 0.16, 0.92, 0.84, 0.92, sw);
-                v
-            }
-            "clipboard" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // NotchStar's "note/card": rounded rect + two text rows.
-                seg(&mut v, 0.20, 0.10, 0.80, 0.10, sw);
-                seg(&mut v, 0.80, 0.10, 0.80, 0.90, sw);
-                seg(&mut v, 0.80, 0.90, 0.20, 0.90, sw);
-                seg(&mut v, 0.20, 0.90, 0.20, 0.10, sw);
-                seg(&mut v, 0.32, 0.36, 0.68, 0.36, sw);
-                seg(&mut v, 0.32, 0.54, 0.68, 0.54, sw);
-                seg(&mut v, 0.32, 0.72, 0.68, 0.72, sw);
-                v
-            }
-            "drop" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Droplet: pointed top curving to a round bottom, mirrored.
-                let tip = (0.50, 0.08);
-                let left = (0.22, 0.56);
-                let right = (0.78, 0.56);
-                seg(&mut v, tip.0, tip.1, 0.30, 0.26, sw);
-                seg(&mut v, 0.30, 0.26, left.0, left.1, sw);
-                seg(&mut v, tip.0, tip.1, 0.70, 0.26, sw);
-                seg(&mut v, 0.70, 0.26, right.0, right.1, sw);
-                ring(&mut v, 0.50, 0.62, 0.36, sw, 14);
-                v
-            }
-            "bolt" => {
-                let sw = 1.25;
-                let mut v = Vec::new();
-                // Classic zig-zag zap.
-                let pts = [
-                    (0.60, 0.04),
-                    (0.22, 0.54),
-                    (0.46, 0.54),
-                    (0.40, 0.96),
-                    (0.78, 0.46),
-                    (0.54, 0.46),
-                ];
-                for i in 0..pts.len() {
-                    let a = pts[i];
-                    let b = pts[(i + 1) % pts.len()];
-                    seg(&mut v, a.0, a.1, b.0, b.1, sw);
-                }
-                v
-            }
-            "calendar" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Calendar: header rail + two hanging posts.
-                seg(&mut v, 0.10, 0.22, 0.90, 0.22, sw);
-                seg(&mut v, 0.90, 0.22, 0.90, 0.94, sw);
-                seg(&mut v, 0.90, 0.94, 0.10, 0.94, sw);
-                seg(&mut v, 0.10, 0.94, 0.10, 0.22, sw);
-                seg(&mut v, 0.30, 0.06, 0.30, 0.22, sw);
-                seg(&mut v, 0.70, 0.06, 0.70, 0.22, sw);
-                seg(&mut v, 0.10, 0.40, 0.90, 0.40, sw);
-                v
-            }
-            "tray" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Shelf: one rail with two blocks standing on it.
-                seg(&mut v, 0.08, 0.74, 0.92, 0.74, sw);
-                seg(&mut v, 0.18, 0.74, 0.18, 0.44, sw);
-                seg(&mut v, 0.18, 0.44, 0.40, 0.44, sw);
-                seg(&mut v, 0.40, 0.44, 0.40, 0.74, sw);
-                seg(&mut v, 0.54, 0.74, 0.54, 0.26, sw);
-                seg(&mut v, 0.54, 0.26, 0.82, 0.26, sw);
-                seg(&mut v, 0.82, 0.26, 0.82, 0.74, sw);
-                v
-            }
-            "terminal" => {
-                let sw = 1.15;
-                let mut v = Vec::new();
-                // Terminal: tray with a prompt `>` over a body line.
-                seg(&mut v, 0.08, 0.14, 0.92, 0.14, sw);
-                seg(&mut v, 0.92, 0.14, 0.92, 0.74, sw);
-                seg(&mut v, 0.92, 0.74, 0.08, 0.74, sw);
-                seg(&mut v, 0.08, 0.74, 0.08, 0.14, sw);
-                seg(&mut v, 0.22, 0.30, 0.46, 0.44, sw);
-                seg(&mut v, 0.22, 0.58, 0.46, 0.44, sw);
-                seg(&mut v, 0.54, 0.58, 0.78, 0.58, sw);
-                v
-            }
-            "settings" => {
-                // A cog, not two concentric circles: the reference's gear reads
-                // as a toothed wheel, so the teeth must break the outline. The
-                // hub is a small open ring so the glyph stays monoline.
-                let sw = 1.25;
-                let mut v = Vec::new();
-                ring(&mut v, 0.50, 0.50, 0.27, sw, 16);
-                ring(&mut v, 0.50, 0.50, 0.09, sw, 8);
-                for i in 0..8 {
-                    let a = (i as f32) * std::f32::consts::TAU / 8.0;
-                    let (c, s) = (a.cos(), a.sin());
-                    seg(
-                        &mut v,
-                        0.5 + 0.25 * c,
-                        0.5 + 0.25 * s,
-                        0.5 + 0.40 * c,
-                        0.5 + 0.40 * s,
-                        sw,
-                    );
-                }
-                v
-            }
-            "pin" => {
-                // A pushpin / thumbtack: a narrow cap on top of flared
-                // shoulders that taper to a point. The shoulders are wider than
-                // the cap so the silhouette reads as a thumbtack, not as a
-                // location marker (circle + triangle) or a slider.
-                let sw = 1.25;
-                let mut v = Vec::new();
-                // cap
-                seg(&mut v, 0.34, 0.14, 0.66, 0.14, sw);
-                seg(&mut v, 0.34, 0.14, 0.34, 0.26, sw);
-                seg(&mut v, 0.66, 0.14, 0.66, 0.26, sw);
-                seg(&mut v, 0.34, 0.26, 0.66, 0.26, sw);
-                // flared shoulders
-                seg(&mut v, 0.34, 0.26, 0.16, 0.46, sw);
-                seg(&mut v, 0.66, 0.26, 0.84, 0.46, sw);
-                seg(&mut v, 0.16, 0.46, 0.84, 0.46, sw);
-                // tapered point
-                seg(&mut v, 0.16, 0.46, 0.50, 0.90, sw);
-                seg(&mut v, 0.84, 0.46, 0.50, 0.90, sw);
-                v
-            }
+            pen(&mut v, &pts, true, sw);
+            circle(&mut v, 0.5, 0.5, 0.10, sw);
+            v
+        }
+        "pin" => {
+            let sw = 1.2;
+            let mut v = Vec::new();
+            // Thumbtack seen from the side: cap, shoulders, then the taper to a
+            // point. One closed outline so every join stays round.
+            pen(
+                &mut v,
+                &[
+                    [0.5, 0.92],
+                    [0.17, 0.46],
+                    [0.33, 0.30],
+                    [0.33, 0.10],
+                    [0.67, 0.10],
+                    [0.67, 0.30],
+                    [0.83, 0.46],
+                ],
+                true,
+                sw,
+            );
+            v
+        }
             _ => return None,
         };
     Some(tris)
@@ -1763,8 +1780,8 @@ mod tests {
     #[test]
     fn present_counts_frames_and_nodes() {
         let mut r = Renderer::new(NonNull::dangling()).expect("renderer");
-        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, true);
-        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, true);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, 0.0, true);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, 0.0, true);
         assert_eq!(r.probe().presents, 2);
         assert_eq!(r.probe().last_node_count, 1);
         assert!(r.probe().avg_frame_ms.is_some());
@@ -1783,7 +1800,7 @@ mod tests {
         let mut r = Renderer::new(NonNull::dangling()).expect("renderer");
         r.resize(0, 0);
         assert_eq!((r.width, r.height), (1, 1));
-        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, true);
+        r.present(&frame(), 1.0, 1.0 / 60.0, 0.0, 0.0, true);
         assert_eq!(
             r.probe().presents,
             1,

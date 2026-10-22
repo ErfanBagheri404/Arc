@@ -16,6 +16,11 @@ pub const PILL_RADIUS: f32 = 16.0;
 pub const PANEL_RADIUS: f32 = 36.0;
 pub const PANEL_H: f32 = 248.0;
 
+/// The velocity the pop spring is kicked with. With `SpringConfig::POP`
+/// (response 0.22 s, damping 0.34) this peaks the scale at ~1.11 and dips it
+/// to ~0.965 before it settles: the reference's inflate-then-squash.
+const POP_VELOCITY: f32 = 4.9;
+
 /// Who currently owns the island's visibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UserVis {
@@ -40,15 +45,12 @@ pub enum WindowMode {
     Expanded,
 }
 
-/// Peek geometry: the minimized pill widened into the reference's hover pill —
-/// a SHORT, wide row (art + title + artist + hairline progress), not a card.
-/// A 460x160 box read as an oval/card, which is the complaint; the reference
-/// hover state is 220x40 at 1x, i.e. ~5.5:1, so the height stays near the
-/// collapsed pill's and only the width grows.
-pub const PEEK_W: f32 = 260.0;
-pub const PEEK_H: f32 = 56.0;
-/// Not `h / 2`: a capsule at this aspect ratio reads as an oval.
-pub const PEEK_RADIUS: f32 = 24.0;
+/// Peek corner radius: `h / 2`, a true capsule. The collapsed pill's bottom is
+/// already a semicircle; the hover pill rounds its top corners the same way.
+/// Mirrors `ui::layout::PEEK_H_REF / 2`.
+pub const PEEK_RADIUS: f32 = crate::ui::layout::PEEK_H_REF / 2.0;
+/// How far the hover (peek) pill drops below the screen top, in logical px.
+pub const PEEK_DROP: f32 = 4.0;
 
 /// Island geometry + morph springs.
 pub struct IslandState {
@@ -61,6 +63,10 @@ pub struct IslandState {
     width: Spring,
     height: Spring,
     radius: Spring,
+    drop: Spring,
+    /// The pop: a scale on the island's size, 1.0 at rest, kicked with a
+    /// velocity when the island grows. Rings once (inflate, dip, settle).
+    pop: Spring,
     /// Opened automatically by a playback start; survives cursor-leave and
     /// collapses again when playback stops. Cleared on any explicit user action.
     auto_expanded: bool,
@@ -75,6 +81,8 @@ impl IslandState {
             width: Spring::new(PILL_W, SpringConfig::OPEN),
             height: Spring::new(PILL_H, SpringConfig::OPEN),
             radius: Spring::new(PILL_RADIUS, SpringConfig::GENERIC),
+            drop: Spring::new(0.0, SpringConfig::GENERIC),
+            pop: Spring::new(1.0, SpringConfig::POP),
             auto_expanded: false,
         }
     }
@@ -163,29 +171,63 @@ impl IslandState {
     /// frame analysis — the reference design's OPEN config was shared across
     /// both directions, which left collapse as slow as expand.
     fn retarget(&mut self) {
-        let expanding = self.mode == WindowMode::Expanded;
-        let (w, h, r) = match self.mode {
-            WindowMode::Expanded => (PANEL_W, PANEL_H, PANEL_RADIUS),
-            WindowMode::Peek => (PEEK_W, PEEK_H, PEEK_RADIUS),
+        let (w, h, r, d) = match self.mode {
+            WindowMode::Expanded => (PANEL_W, PANEL_H, PANEL_RADIUS, 0.0),
+            WindowMode::Peek => (
+                crate::ui::layout::PEEK_W_REF,
+                crate::ui::layout::PEEK_H_REF,
+                PEEK_RADIUS,
+                PEEK_DROP,
+            ),
             // `Hidden` keeps the pill's target: the window is hidden while the
             // springs settle, so when it comes back there is no jump.
-            WindowMode::Collapsed | WindowMode::Hidden => (PILL_W, PILL_H, PILL_RADIUS),
+            WindowMode::Collapsed | WindowMode::Hidden => (PILL_W, PILL_H, PILL_RADIUS, 0.0),
         };
-        if expanding {
-            // Height leads (drop), width follows (spread), radius trails.
-            self.width.set_config(SpringConfig::new(0.30, 0.9));
-            self.height.set_config(SpringConfig::OPEN);
-            self.radius.set_config(SpringConfig::GENERIC);
-        } else {
-            // Collapse into the smaller state including a peek shrink: fast
+        match self.mode {
+            // VNotch's morph BOUNCES: height drops first and overshoots, width
+            // spreads after it, radius trails — each springs past its target and
+            // settles back, which is what makes the island read as alive instead
+            // of as a box that changed size.
+            WindowMode::Expanded => {
+                self.width.set_config(SpringConfig::new(0.34, 0.8));
+                self.height.set_config(SpringConfig::new(0.40, 0.62));
+                self.radius.set_config(SpringConfig::new(0.46, 0.7));
+                self.drop.set_config(SpringConfig::new(0.30, 0.7));
+            }
+            // Hover: a short bob. The drop is the only spring that moves, so
+            // its overshoot is what the pill's bounce is made of; peek_t clamps
+            // at 1 while the body keeps dipping, so the shape stays a capsule
+            // through the whole bounce.
+            WindowMode::Peek => {
+                self.width.set_config(SpringConfig::new(0.26, 0.88));
+                self.height.set_config(SpringConfig::new(0.28, 0.82));
+                self.radius.set_config(SpringConfig::new(0.30, 0.72));
+                self.drop.set_config(SpringConfig::new(0.36, 0.52));
+            }
+            // Collapse into the smaller state including a peek release: fast
             // and critically damped, no overshoot, ~2/3 of the expand time.
-            self.width.set_config(SpringConfig::new(0.20, 1.0));
-            self.height.set_config(SpringConfig::new(0.13, 1.0));
-            self.radius.set_config(SpringConfig::new(0.22, 1.0));
+            _ => {
+                self.width.set_config(SpringConfig::new(0.20, 1.0));
+                self.height.set_config(SpringConfig::new(0.13, 1.0));
+                self.radius.set_config(SpringConfig::new(0.22, 1.0));
+                self.drop.set_config(SpringConfig::new(0.15, 1.0));
+            }
         }
         self.width.set_target(w);
         self.height.set_target(h);
         self.radius.set_target(r);
+        self.drop.set_target(d);
+
+        // The reference notch INFLATES before it morphs: the pill pops ~11%
+        // wider, dips ~4% below its rest size, then settles (measured off
+        // vnotch-dynamic.gif frames 115-130). A spring at rest that is given a
+        // velocity rings exactly that way, so kick it instead of hand-rolling
+        // a second animation. Only on the way UP: the reference collapse is
+        // straight, with no pop.
+        if matches!(self.mode, WindowMode::Peek | WindowMode::Expanded) {
+            self.pop.set_config(SpringConfig::POP);
+            self.pop.set_velocity(POP_VELOCITY);
+        }
     }
 
     /// Hide for a fullscreen app, remembering what to come back to.
@@ -285,7 +327,7 @@ impl IslandState {
     }
 
     pub fn logical_width(&self) -> f32 {
-        self.width.value()
+        self.width.value() * self.pop_scale()
     }
 
     /// The window frame width. Fixed: `max(PILL_W, PANEL_W)` plus the ear wings,
@@ -305,10 +347,22 @@ impl IslandState {
         (self.frame_width() - self.logical_width()) / 2.0
     }
 
+    pub fn body_offset_y(&self) -> f32 {
+        self.drop.value().max(0.0)
+    }
+
     /// Window frame width: body + ear wings on both sides.
 
     pub fn logical_height(&self) -> f32 {
-        self.height.value()
+        self.height.value() * self.pop_scale()
+    }
+
+    /// How much the pop is inflating the island right now. The pop only
+    /// touches the pill: its influence fades out as the island morphs into
+    /// the panel, so an expanding panel never breathes.
+    fn pop_scale(&self) -> f32 {
+        let open = crate::ui::layout::openness(self.width.value(), self.height.value());
+        1.0 + (self.pop.value() - 1.0) * (1.0 - open)
     }
 
     /// The radius spring's live value. The UI derives radius from `openness`,
@@ -324,7 +378,9 @@ impl IslandState {
         let a = self.width.step(dt);
         let b = self.height.step(dt);
         let c = self.radius.step(dt);
-        a || b || c
+        let d = self.drop.step(dt);
+        let e = self.pop.step(dt);
+        a || b || c || d || e
     }
 }
 
@@ -494,7 +550,7 @@ mod tests {
         }
         assert_eq!(s.mode(), WindowMode::Peek);
         assert!(!s.expanded());
-        assert!(s.logical_width() <= PEEK_W + 0.5);
+        assert!(s.logical_width() <= crate::ui::layout::PEEK_W_REF + 0.5);
 
         // Away from it → back to the minimized pill.
         assert!(s.hover_step(false));

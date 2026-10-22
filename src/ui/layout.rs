@@ -9,11 +9,14 @@ use crate::core::scene::Align;
 
 /// Collapsed pill width, mirrored from `app::state::PILL_W`.
 pub const PILL_W_REF: f32 = 185.0;
-/// Hover (peek) pill width, mirrored from `app::state::PEEK_W`. The peek state
-/// is a size, not an `openness` sample: `openness` on a 340x56 frame reads ~0.11
-/// because the height barely leaves `PILL_H_REF`, which would draw the peek
-/// contents at ~3% alpha. Peek fades on its own width ramp instead.
-pub const PEEK_W_REF: f32 = 260.0;
+/// Hover (peek) pill geometry == the minimized pill's: same 185x32 box. The
+/// comparison is the MINIMIZED WIDTH WITHOUT THE ARCS -- the concave ear wings
+/// at the top right and top left are decoration, not part of the pill's width
+/// -- so the hover state changes SHAPE only (wings gone, top corners rounded
+/// to h/2 = a capsule) and drops a few px below the screen top. Widening was
+/// never asked for and read as a different widget.
+pub const PEEK_W_REF: f32 = PILL_W_REF;
+pub const PEEK_H_REF: f32 = PILL_H_REF;
 /// Expanded panel width, mirrored from `app::state::PANEL_W`.
 pub const PANEL_W_REF: f32 = 640.0;
 /// Collapsed pill corner radius, mirrored from `app::state::PILL_RADIUS`.

@@ -32,6 +32,12 @@ impl SpringConfig {
     /// Overdamped swap used for content crossfades.
     pub const SWAP: Self = Self::new(0.34, 1.2);
 
+    /// The island's pop: a fast, loose spring (zeta 0.34) that rings once and
+    /// settles. Measured off the reference morph (vnotch-dynamic.gif frames
+    /// 115-130): the pill inflates ~11%, dips ~4% below its rest size, then
+    /// settles -- one half-cycle about 117 ms, settled inside 350 ms.
+    pub const POP: Self = Self::new(0.22, 0.34);
+
     fn w0(self) -> f32 {
         std::f32::consts::TAU / self.response.max(f32::MIN_POSITIVE)
     }
@@ -79,6 +85,14 @@ impl Spring {
     /// Retarget without discontinuity in velocity.
     pub fn set_target(&mut self, target: f32) {
         self.target = target;
+    }
+
+    /// Kick the spring with an initial velocity, leaving value and target
+    /// alone. A spring at rest that is given a nudge rings: it overshoots once
+    /// and settles back. That is the island's pop (the reference notch
+    /// inflates ~11% and dips ~4% before it morphs).
+    pub fn set_velocity(&mut self, velocity: f32) {
+        self.velocity = velocity;
     }
 
     /// Jump instantly, killing velocity (used on layout/size changes).

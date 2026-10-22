@@ -278,6 +278,9 @@ fn notch_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     segs
 }
 
+/// Bézier outline of a rounded rect. A corner whose radius reaches `min(w,h)/2`
+/// is a semicircular cap (a capsule) and gets the circle-.tight constant;
+/// everything else stays the squircle fillet.
 pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     if radii.top_left < 0.0 || radii.top_right < 0.0 {
         return notch_segments(rect, radii);
@@ -285,7 +288,20 @@ pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let r = radii.clamped(rect.w, rect.h);
     let (x, y) = (rect.x, rect.y);
     let (max_x, max_y) = (rect.max_x(), rect.max_y());
-    let c = SQUIRCLE_C;
+
+    // A corner whose radius reaches h/2 is a semicircular end cap — a capsule.
+    // The squircle curve hugs the corner there and reads as a rounded square,
+    // so a capsule uses the circle-Bézier constant instead (c = 0.5523 puts the
+    // control offsets at k·r = (4/3)·tan(22.5°)·r, the exact quarter-circle arc).
+    // Partially rounded corners keep the squircle look.
+    let cap = (rect.w.min(rect.h) / 2.0).max(0.0);
+    let corner_c = |corner: f32| {
+        if corner >= cap - 0.5 {
+            0.5523
+        } else {
+            SQUIRCLE_C
+        }
+    };
 
     // Four pushes with an exact matching capacity, each with its own comment
     // about which edge of the squircle it builds — clearer than an array of
@@ -293,24 +309,28 @@ pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let mut segs = Vec::with_capacity(4);
 
     // Top-left: (x + r.tl, y) → (x, y + r.tl)
+    let c = corner_c(r.top_left);
     segs.push(PathSegment {
         c1: (x + r.top_left * (1.0 - c), y),
         c2: (x, y + r.top_left * (1.0 - c)),
         to: (x, y + r.top_left),
     });
     // Bottom-left: (x, max_y - r.bl) → (x + r.bl, max_y)
+    let c = corner_c(r.bottom_left);
     segs.push(PathSegment {
         c1: (x, max_y - r.bottom_left * (1.0 - c)),
         c2: (x + r.bottom_left * (1.0 - c), max_y),
         to: (x + r.bottom_left, max_y),
     });
     // Bottom-right: (max_x - r.br, max_y) → (max_x, max_y - r.br)
+    let c = corner_c(r.bottom_right);
     segs.push(PathSegment {
         c1: (max_x - r.bottom_right * (1.0 - c), max_y),
         c2: (max_x, max_y - r.bottom_right * (1.0 - c)),
         to: (max_x, max_y - r.bottom_right),
     });
     // Top-right: (max_x, y + r.tr) → (max_x - r.tr, y)
+    let c = corner_c(r.top_right);
     segs.push(PathSegment {
         c1: (max_x, y + r.top_right * (1.0 - c)),
         c2: (max_x - r.top_right * (1.0 - c), y),
@@ -459,6 +479,23 @@ mod tests {
         assert!(
             (d - ios).abs() < 0.02 * r,
             "corner {d:.3} px from the rect corner; iOS lands at {ios:.3}"
+        );
+    }
+
+    #[test]
+    fn capsule_caps_are_circles_not_fillets() {
+        // The hover pill's corner reaches h/2, so its control offsets must be
+        // the circle one (0.4477·r), not the squircle one (0.1·r).
+        let rect = Rect::new(0.0, 0.0, 220.0, 38.0);
+        let r = 19.0;
+        let segs = squircle_segments(&rect, CornerRadii::uniform(r));
+        // c1 of the top-left segment is on the top edge, at (1 - c)·r from
+        // the corner: circle → 0.4477·19 = 8.5, squircle → 0.1·19 = 1.9.
+        let offset = segs[0].c1.0 - segs[0].to.0;
+        assert!(
+            (offset - 0.4477 * r).abs() < 0.02 * r,
+            "capsule control offset {offset:.3}, expected the circle cap value {:.3}",
+            0.4477 * r
         );
     }
 

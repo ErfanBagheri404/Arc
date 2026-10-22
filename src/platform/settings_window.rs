@@ -390,7 +390,7 @@ impl SettingsWindow {
         let (w, h) = self.state.physical;
         self.renderer.resize(w.max(1), h.max(1));
         let scale = self.state.scale;
-        self.renderer.present(frame, scale, 0.0, 0.0, true);
+        self.renderer.present(frame, scale, 0.0, 0.0, 0.0, true);
     }
 
     /// Bring a hidden window back, re-reading its live metrics first.

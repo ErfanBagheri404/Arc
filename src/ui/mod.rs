@@ -220,6 +220,9 @@ pub struct ViewState {
     /// True while the island is in the hover (peek) state — the minimized
     /// pill grown into a compact media pill. Drives the peek branch in build.
     pub peek: bool,
+    /// 0..1 blend of the collapsed (concave ears) → hover (rounded, detached)
+    /// pill morph. Drives the corner-radius and vertical drop of the body.
+    pub peek_t: f32,
     /// Index into [`TABS`] under the cursor, if any.
     pub hover_tab: Option<usize>,
     /// Content row under the cursor, if any.
@@ -608,6 +611,12 @@ pub fn build(state: &ViewState) -> Frame {
     let frame = Rect::new(0.0, 0.0, fw, fh);
     let open = openness(fw, fh);
     let radius = island_radius(open);
+    let peek_t = state.peek_t.clamp(0.0, 1.0);
+    // Collapsed: concave ear wings at the top corners (negative radius).
+    // Hover (peek): the ears are removed and the top corners round, giving a
+    // floating pill detached from the screen top.
+    let top_r = (-layout::EAR_W) * (1.0 - peek_t) + (fh / 2.0) * peek_t;
+    let bottom_r = radius * (1.0 - peek_t) + (fh / 2.0) * peek_t;
 
     let mut scene = Scene::new();
 
@@ -619,10 +628,10 @@ pub fn build(state: &ViewState) -> Frame {
     scene.push(Node::RoundRect {
         rect: frame,
         radii: CornerRadii {
-            top_left: -layout::EAR_W,
-            top_right: -layout::EAR_W,
-            bottom_left: radius,
-            bottom_right: radius,
+            top_left: top_r,
+            top_right: top_r,
+            bottom_left: bottom_r,
+            bottom_right: bottom_r,
         }
         .clamped(fw, fh),
         fill: state.notch_bg,
@@ -637,68 +646,86 @@ pub fn build(state: &ViewState) -> Frame {
         };
     }
 
-    // 2. Peek (hover): the reference's hover pill — one short, wide row (art,
-    //    title over artist, hairline progress hugging the bottom edge).
-    //    Deliberately NOT the panel's media block: that block is 120 px tall and
-    //    turned a 5.5:1 pill into a card/oval. Returns before the collapsed
-    //    glyph / activity / standing rows, so the minimized pill's own contents
-    //    (mascot, viz bars, accent arc) never leak through underneath.
+    // 2. Peek (hover): the collapsed pill re-shaped into a capsule of the same
+    //    size (185x32): the ear wings are gone, the top corners round to h/2,
+    //    and it detaches from the top by PEEK_DROP. Width is the minimized
+    //    body width -- the arcs at the top corners are not part of it -- so
+    //    hovering changes the shape, never the size.
+    //    Content: the reference's collapsed shape — title + thin VU bars on the
+    //    right, no art, no progress.
     if state.peek {
-        // Fade on the peek width ramp, not `openness`: a 340x56 frame is only
-        // ~11% "open" by the panel lerp, which would erase the contents.
-        let opacity =
-            ((fw - layout::PILL_W_REF) / (layout::PEEK_W_REF - layout::PILL_W_REF)).clamp(0.0, 1.0);
-        let art = (fh - 24.0).clamp(20.0, 34.0);
-        let x = 12.0;
-        let y = (fh - art) / 2.0 - 2.0;
-        let tx = x + art + 10.0;
-        let tw = (fw - tx - 14.0).max(8.0);
-        let title = TextStyle {
-            size: 12.5,
-            weight: Weight::Semibold,
-            color: layout::fade(Rgba::WHITE, opacity),
-            ..TextStyle::default()
-        };
-        let sub = TextStyle {
-            size: 10.5,
-            color: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.55), opacity),
-            ..TextStyle::default()
-        };
-        let (th, sh) = (line_height(&title), line_height(&sub));
-        let stack = th + sh;
-        let ty = (fh - stack) / 2.0 - 1.0;
-        scene.push(Node::Image {
-            rect: put(fw, fh, Rect::new(x, y, art, art)),
-            handle: state
-                .media
-                .art
-                .map(crate::core::scene::ImageHandle)
-                .unwrap_or_default(),
-            radii: CornerRadii::uniform(8.0),
-        });
-        scene.push(Node::Text {
-            rect: put(fw, fh, Rect::new(tx, ty, tw, th)),
-            text: if state.media.title.is_empty() {
-                "Nothing playing".to_string()
-            } else {
-                state.media.title.clone()
-            },
-            style: title,
-        });
-        scene.push(Node::Text {
-            rect: put(fw, fh, Rect::new(tx, ty + th, tw, sh)),
-            text: state.media.artist.clone(),
-            style: sub,
-        });
-        if let Some(p) = state.media.progress() {
-            let bar = Rect::new(x, fh - 4.0, (fw - x * 2.0).max(0.0), 2.0);
-            scene.push(Node::Bar {
-                rect: put(fw, fh, bar),
-                progress: p,
-                track: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.18), opacity),
-                fill: layout::fade(Rgba::WHITE, opacity),
-                radii: CornerRadii::uniform(1.0),
-            });
+        let opacity = peek_t;
+        if opacity > 0.0 {
+            // A live HUD takes the glyph's slot.
+            match &state.hud {
+                Some(hud) => {
+                    for n in pill_hud(fw, fh, hud, opacity) {
+                        scene.push(n);
+                    }
+                }
+                None => {
+                    if state.media.playing {
+                        let title_text = if state.media.title.is_empty() {
+                            "Nothing playing".to_string()
+                        } else {
+                            state.media.title.clone()
+                        };
+                        let title = TextStyle {
+                            size: 12.5,
+                            weight: Weight::Semibold,
+                            color: layout::fade(Rgba::WHITE, opacity),
+                            ..TextStyle::default()
+                        };
+                        let th = line_height(&title);
+                        let viz_total = VIZ_BAR_W * 4.0 + VIZ_GAP * 3.0;
+                        let viz_x0 = fw - PILL_MEDIA_INSET - viz_total;
+                        let tx = 14.0;
+                        let tw = (viz_x0 - tx - 6.0).max(8.0);
+                        scene.push(Node::Text {
+                            rect: put(fw, fh, Rect::new(tx, (fh - th) / 2.0, tw, th)),
+                            text: title_text,
+                            style: title,
+                        });
+                        let cy = fh / 2.0;
+                        let heights = state.viz.heights();
+                        for (i, h) in heights.iter().enumerate() {
+                            let hh = (14.0 * h).max(3.0);
+                            scene.push(Node::RoundRect {
+                                rect: put(
+                                    fw,
+                                    fh,
+                                    Rect::new(
+                                        viz_x0 + i as f32 * (VIZ_BAR_W + VIZ_GAP),
+                                        cy - hh / 2.0,
+                                        VIZ_BAR_W,
+                                        hh,
+                                    ),
+                                ),
+                                radii: CornerRadii::uniform(VIZ_BAR_W / 2.0),
+                                fill: layout::fade(Rgba::rgba(1.0, 1.0, 1.0, 0.9), opacity),
+                            });
+                        }
+                    } else if let Some(pet) = state.pet {
+                        let (sx, sy, sw, sh) = crate::services::pet::frame_rect(pet.frame);
+                        let h = (crate::ui::layout::PILL_H_REF - PILL_PET_PAD * 2.0)
+                            * state.pet_scale();
+                        let w = h * (sw / sh);
+                        scene.push(Node::Sprite {
+                            rect: put(fw, fh, Rect::new((fw - w) / 2.0, (fh - h) / 2.0, w, h)),
+                            handle: pet.handle,
+                            src: Rect::new(sx, sy, sw, sh),
+                            opacity,
+                        });
+                    } else {
+                        let g = PILL_GLYPH;
+                        scene.push(Node::RoundRect {
+                            rect: put(fw, fh, Rect::new((fw - g) / 2.0, (fh - g) / 2.0, g, g)),
+                            radii: CornerRadii::uniform(PILL_GLYPH_RADIUS),
+                            fill: layout::fade(PILL_GREY, opacity),
+                        });
+                    }
+                }
+            }
         }
         return Frame {
             size: (fw, fh),
@@ -1738,65 +1765,68 @@ mod tests {
         build(&view_sized(PILL_W_REF, PILL_H_REF))
     }
 
-    /// A peek frame is the body plus one media row and nothing else: the
-    /// collapsed glyph / viz bars / standing rows must not leak through it, and
-    /// the row must be fully opaque (a 340x56 frame is only ~11% "open" by the
-    /// panel lerp, so easing on `openness` erased the contents).
+    /// The hover (peek) frame is a capsule — concave ear wings gone, all four
+    /// corners rounded to h/2 — detached from the top by PEEK_DROP.
     #[test]
-    fn peek_frame_is_a_media_row_and_nothing_from_the_minimized_pill() {
-        let mut v = view_sized(layout::PEEK_W_REF, 56.0);
+    fn peek_frame_is_a_capsule_with_no_concave_ears() {
+        let mut v = view_sized(layout::PEEK_W_REF, layout::PEEK_H_REF);
         v.peek = true;
+        v.peek_t = 1.0;
         let f = build(&v);
         assert_eq!(
             f.size,
-            (layout::PEEK_W_REF, 56.0),
+            (layout::PEEK_W_REF, layout::PEEK_H_REF),
             "peek takes the peek size, not the pill's"
         );
 
-        // A peek frame is the body plus a media row: art, title, artist, and a
-        // progress bar only while a session is reporting one. Anything else
-        // (a leaked glyph, viz bars, a dock) shows up as a node of the wrong
-        // kind, not as a count the bar's presence could excuse.
-        assert!(
-            (4..=5).contains(&f.scene.nodes.len()),
-            "peek drew {} nodes, expected just the media row",
-            f.scene.nodes.len()
-        );
-        assert!(
-            matches!(f.scene.nodes[1], Node::Image { .. }),
-            "second node is the album art"
-        );
-        assert!(
-            matches!(f.scene.nodes[2], Node::Text { .. })
-                && matches!(f.scene.nodes[3], Node::Text { .. }),
-            "then the title and artist"
-        );
-        if f.scene.nodes.len() == 5 {
-            assert!(
-                matches!(f.scene.nodes[4], Node::Bar { .. }),
-                "then the progress bar"
-            );
-        }
-
-        let Node::RoundRect { rect, .. } = &f.scene.nodes[0] else {
+        let Node::RoundRect { rect, radii, .. } = &f.scene.nodes[0] else {
             panic!("first node is the body")
         };
-        assert_eq!(
-            rect.w,
-            layout::PEEK_W_REF,
-            "the body must span the whole peek frame"
+        assert_eq!(rect.w, layout::PEEK_W_REF, "body spans the frame");
+        assert_eq!(rect.h, layout::PEEK_H_REF, "body spans the frame");
+        // Fully rounded: every corner is h/2 — a capsule, not a card.
+        let half = layout::PEEK_H_REF / 2.0;
+        assert!(
+            (radii.top_left - half).abs() < 1e-4,
+            "top-left radius {} != h/2 {}",
+            radii.top_left,
+            half
         );
+        assert!(
+            (radii.top_right - half).abs() < 1e-4,
+            "top-right radius {} != h/2 {}",
+            radii.top_right,
+            half
+        );
+        assert!(
+            radii.top_left >= 0.0 && radii.top_right >= 0.0,
+            "no concave ear wings on hover"
+        );
+    }
 
-        for n in &f.scene.nodes[2..4] {
-            let Node::Text { style, .. } = n else { continue };
-            // The artist line is intentionally dimmer (0.55); the bug this
-            // guards is the openness-based fade, which drove both to ~0.03.
-            assert!(
-                style.color.a >= 0.5,
-                "peek text drew at alpha {} — it used openness as the fade",
-                style.color.a
-            );
-        }
+    /// The width rule for the hover pill: it takes the MINIMIZED pill's width
+    /// with the arcs excluded. The concave ear wings flare past each top corner
+    /// but are decoration, not width -- so the hover capsule is exactly as wide
+    /// as the collapsed pill's body box, not as wide as the silhouette you see
+    /// across the top. Anything wider reads as a different, larger widget.
+    #[test]
+    fn peek_width_is_the_minimized_body_width_not_the_arced_silhouette() {
+        let f = collapsed();
+        let Node::RoundRect { rect, radii, .. } = &f.scene.nodes[0] else {
+            panic!("first node is the body")
+        };
+        assert_eq!(rect.w, layout::PILL_W_REF, "collapsed body spans the frame");
+        assert!(radii.top_left < 0.0, "collapsed top corners are concave ears");
+
+        assert_eq!(
+            layout::PEEK_W_REF,
+            rect.w,
+            "hover width must equal the collapsed BODY width (arcs excluded)"
+        );
+        assert!(
+            layout::PEEK_W_REF < rect.w + 2.0 * layout::EAR_W,
+            "hover must not grow to the arced silhouette width"
+        );
     }
 
     fn panel() -> Frame {

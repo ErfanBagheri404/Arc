@@ -41,6 +41,16 @@ impl Dpi {
         (px.max(1.0)) as u32
     }
 
+    /// Snap a logical *offset* to whole physical pixels.
+    ///
+    /// Unlike [`Self::snap`] this may be 0: an offset of zero must stay zero.
+    /// `snap` floors at 1 px because a zero-size box is degenerate, but a
+    /// zero offset is not -- snapping it to 1 shifted the window region down
+    /// by a pixel and left the collapsed pill with a gap under the screen top.
+    pub fn snap_offset(&self, logical: f32) -> i32 {
+        (self.to_physical(logical).round() as i32).max(0)
+    }
+
     /// Scale a DPI-derived value (96 dpi == 100% == scale 1.0).
     pub fn from_dpi(dpi_x: u32) -> Self {
         Self {
@@ -81,5 +91,16 @@ mod tests {
     fn zero_scale_does_not_divide_by_zero() {
         let d = Dpi { scale: 0.0 };
         assert_eq!(d.to_logical(42.0), 42.0);
+    }
+
+    #[test]
+    fn snap_offset_keeps_zero_at_zero() {
+        // The collapsed pill's body offset is 0; `snap` would floor that to 1
+        // and leave a pixel-wide gap under the screen top.
+        assert_eq!(Dpi::default().snap_offset(0.0), 0);
+        assert_eq!(Dpi::from_dpi(120).snap_offset(0.0), 0);
+        assert_eq!(Dpi::from_dpi(120).snap_offset(-4.0), 0);
+        assert_eq!(Dpi::from_dpi(120).snap_offset(4.0), 5);
+        assert_eq!(Dpi::default().snap_offset(2.4), 2);
     }
 }
