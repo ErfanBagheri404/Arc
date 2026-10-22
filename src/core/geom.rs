@@ -227,8 +227,14 @@ pub fn notch_metrics(rect: &Rect, radii: CornerRadii) -> (f32, f32, f32, f32, f3
     // the frame, or the two wings would cross.
     let wing = |v: f32| (-v).max(0.0).min(rect.h).min(rect.w / 2.0);
     let (wl, wr) = (wing(radii.top_left), wing(radii.top_right));
-    let body_left = rect.x + wl;
-    let body_right = rect.max_x() - wr;
+    // The wings flare OUTSIDE the body, so they never narrow it: the body keeps
+    // the frame's full width, which is the width every caller (content layout,
+    // the hover capsule, the click hit-test) already assumes. Carving the wings
+    // out of the rect painted a 20px-narrower body than the content laid out in,
+    // which is what made edges look eaten and the minimized pill read narrower
+    // than the hover one.
+    let body_left = rect.x;
+    let body_right = rect.max_x();
     let body_w = (body_right - body_left).max(0.0);
     let m = (rect.h / 2.0).min(body_w / 2.0);
     let bl = radii.bottom_left.max(0.0).min(m);
@@ -248,13 +254,13 @@ fn notch_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let c = SQUIRCLE_C;
     let mut segs = Vec::with_capacity(4);
 
-    // TR wing: (max_x, y) → (body_r, y + wr). Cubic of the Swift quadratic
-    // with control on the top edge — tangent horizontal at the screen corner,
-    // vertical where it meets the body's side.
+    // TR wing: outer top (rect.max_x() + wr, y) → body right side (rect.max_x(), y + wr).
+    // Flares OUTWARD into the transparent frame margin, so the body keeps its
+    // full width and the ears are decoration beside it, not carved out of it.
     segs.push(PathSegment {
-        c1: (rect.max_x() - wr * 2.0 / 3.0, y),
-        c2: (body_r, y + wr / 3.0),
-        to: (body_r, y + wr),
+        c1: (rect.max_x() + wr * 1.0 / 3.0, y),
+        c2: (rect.max_x(), y + wr / 3.0),
+        to: (rect.max_x(), y + wr),
     });
     // Bottom-right on the body's own extent.
     segs.push(PathSegment {
@@ -268,11 +274,12 @@ fn notch_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
         c2: (body_l, max_y - bl * (1.0 - c)),
         to: (body_l, max_y - bl),
     });
-    // TL wing: (body_l, y + wl) → (rect.x, y), mirroring the TR wing.
+    // TL wing: body left side (rect.x, y + wl) → outer top (rect.x - wl, y),
+    // mirroring the TR wing. Flares OUTWARD into the transparent margin.
     segs.push(PathSegment {
-        c1: (body_l, y + wl / 3.0),
-        c2: (rect.x + wl * 2.0 / 3.0, y),
-        to: (rect.x, y),
+        c1: (rect.x, y + wl / 3.0),
+        c2: (rect.x - wl * 1.0 / 3.0, y),
+        to: (rect.x - wl, y),
     });
 
     segs
@@ -378,10 +385,11 @@ mod tests {
     }
 
     #[test]
-    fn notch_wings_scoop_from_the_frame_corners_into_the_body_sides() {
-        // The silhouette is one figure: each wing leaves the frame's own
-        // top corner tangent to the screen edge, curves in, and lands on the
-        // body's side — which is inset by exactly the wing's width.
+    fn notch_wings_scoop_from_the_body_sides_outward_past_the_frame() {
+        // The silhouette is one figure: each wing leaves the body's side at the
+        // frame's top edge and flares OUT into the transparent margin — so the
+        // body keeps the frame's full width (the width content lays out in) and
+        // the ears are decoration beside it, never carved out of it.
         let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
         let radii = CornerRadii {
             top_left: -20.0,
@@ -392,19 +400,22 @@ mod tests {
         let segs = squircle_segments(&rect, radii);
         assert_eq!(segs.len(), 4);
         // Order: TR wing, BR, BL, TL wing.
-        assert_eq!(segs[0].to, (80.0, 20.0), "TR wing lands on the body side");
+        assert_eq!(
+            segs[0].to,
+            (rect.max_x(), 20.0),
+            "TR wing lands on the body's own right side"
+        );
         assert_eq!(
             segs[3].to,
-            (0.0, 0.0),
-            "TL wing returns to the frame corner"
+            (-20.0, 0.0),
+            "TL wing ends in the margin, mirrored past the frame's left edge"
         );
-        // Tangent horizontal at the screen edge, vertical on the body side.
+        // Tangent horizontal in the margin, vertical down the body's side.
         assert_eq!(segs[0].c1.1, rect.y);
-        assert_eq!(segs[0].c2.0, 80.0);
-        // Bottom corners ride the inset body, not the full frame: BR ends on
-        // the bottom edge, BL ends where the body's left side begins.
-        assert_eq!(segs[1].to, (72.0, 40.0));
-        assert_eq!(segs[2].to, (20.0, 32.0));
+        assert_eq!(segs[0].c2.0, rect.max_x());
+        // Bottom corners ride the FULL frame: the body is not inset anymore.
+        assert_eq!(segs[1].to, (rect.max_x() - 8.0, 40.0));
+        assert_eq!(segs[2].to, (0.0, 32.0));
     }
 
     #[test]
@@ -419,17 +430,21 @@ mod tests {
             bottom_right: 16.0,
         };
         let (body_l, body_r, bl, br, wl, wr) = notch_metrics(&rect, radii);
-        assert!(
-            body_l <= body_r,
-            "wings must not cross: {body_l} > {body_r}"
+        assert_eq!(
+            (body_l, body_r),
+            (rect.x, rect.max_x()),
+            "the wings never narrow the body"
         );
         assert_eq!(wl, wr);
         assert!(bl >= 0.0 && br >= 0.0);
         let segs = squircle_segments(&rect, radii);
         for s in &segs {
             for (px, py) in [s.c1, s.c2, s.to] {
+                // The wings may reach into the transparent margin (that is what
+                // they are for), but only by the clamped wing width — never
+                // unbounded, and never past the body's own edges.
                 assert!(
-                    px >= rect.x - 1e-3 && px <= rect.max_x() + 1e-3,
+                    px >= rect.x - wl - 1e-3 && px <= rect.max_x() + wr + 1e-3,
                     "control escaped: {px}"
                 );
                 assert!(

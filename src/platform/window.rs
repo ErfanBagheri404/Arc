@@ -889,10 +889,15 @@ impl Overlay {
         self.state.body_width = width.max(0);
         self.state.body_height = self.dpi().snap(logical_h) as i32;
         self.state.body_offset_y = self.dpi().snap_offset(offset_y);
-        // Window coords (popup: client == window): body rect only.
-        let l = self.state.body_inset;
+        // Window coords (popup: client == window): the body rect *extended*
+        // out to the ear wings, which the outline now draws OUTSIDE the body,
+        // flaring to the frame's top corners (the frame margin exists for them).
+        // `WM_NCHITTEST` keeps passing clicks in the ears to the desktop
+        // (`HTTRANSPARENT`), so the bigger region only unclips the drawing.
+        let ear = self.dpi().snap(crate::ui::layout::EAR_W) as i32;
+        let l = (self.state.body_inset - ear).max(0);
         let t = self.state.body_offset_y.max(0);
-        let (r, b) = (l + self.state.body_width, t + self.state.body_height);
+        let (r, b) = (l + self.state.body_width + 2 * ear, t + self.state.body_height);
         if (l, t, r, b) != self.state.applied_rgn {
             self.state.applied_rgn = (l, t, r, b);
             // SAFETY: CreateRectRgn returns an owned HRGN; SetWindowRgn takes
