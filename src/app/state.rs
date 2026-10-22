@@ -17,9 +17,10 @@ pub const PANEL_RADIUS: f32 = 36.0;
 pub const PANEL_H: f32 = 248.0;
 
 /// The velocity the pop spring is kicked with. With `SpringConfig::POP`
-/// (response 0.22 s, damping 0.34) this peaks the scale at ~1.11 and dips it
-/// to ~0.965 before it settles: the reference's inflate-then-squash.
-const POP_VELOCITY: f32 = 4.9;
+/// (response 0.38 s, damping 0.33) this rings the scale to 1.113 at +100 ms
+/// and back down to 0.963 at +300 ms before settling: the reference's
+/// inflate-then-squash, to three decimal places.
+const POP_VELOCITY: f32 = 3.0;
 
 /// Who currently owns the island's visibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -651,6 +652,10 @@ mod tests {
     /// VNotch's staged morph: the height (the drop) leads, the width (the
     /// spread) follows. Both springs leave the pill together, so the one with
     /// the slower config must be behind a few frames in.
+    ///
+    /// Measured on the raw springs, not `logical_*`: those multiply in the pop
+    /// scale, which inflates both axes and skews progress toward the wider
+    /// target. This assertion is about the morph, not the pop.
     #[test]
     fn the_morph_stages_height_before_width() {
         let mut s = IslandState::collapsed();
@@ -658,8 +663,8 @@ mod tests {
         for _ in 0..4 {
             s.step_dt(1.0 / 60.0);
         }
-        let hp = (s.logical_height() - PILL_H) / (PANEL_H - PILL_H);
-        let wp = (s.logical_width() - PILL_W) / (PANEL_W - PILL_W);
+        let hp = (s.height.value() - PILL_H) / (PANEL_H - PILL_H);
+        let wp = (s.width.value() - PILL_W) / (PANEL_W - PILL_W);
         assert!(hp > wp, "height must lead: hp={hp} wp={wp}");
     }
 
@@ -694,6 +699,39 @@ mod tests {
         assert!(
             close_frames < open_frames,
             "collapse must be the faster morph: {close_frames} >= {open_frames}"
+        );
+    }
+
+    /// The pop has to reach the pill, not just the spring.
+    ///
+    /// Regression: `POP_VELOCITY` sat below the settle threshold, so hovering
+    /// produced a dead-straight morph with no bounce at all. The reference
+    /// (vnotch-dynamic.gif f117) inflates the pill ~11% and dips it ~4%.
+    #[test]
+    fn hovering_bounces_the_pill_past_its_rest_width() {
+        let mut s = IslandState::collapsed();
+        assert!(s.hover_step(true), "cursor over the pill must peek it");
+        let (mut peak, mut trough) = (s.logical_width(), s.logical_width());
+        let mut t = 0.0;
+        while s.step_dt(1.0 / 240.0) && t < 2.0 {
+            t += 1.0 / 240.0;
+            peak = peak.max(s.logical_width());
+            trough = trough.min(s.logical_width());
+        }
+        let ratio_peak = peak / crate::ui::layout::PEEK_W_REF;
+        let ratio_trough = trough / crate::ui::layout::PEEK_W_REF;
+        assert!(
+            (ratio_peak - 1.112).abs() < 0.02,
+            "hover must inflate ~11%: peak {ratio_peak}"
+        );
+        assert!(
+            (ratio_trough - 0.963).abs() < 0.02,
+            "and squash ~4%: trough {ratio_trough}"
+        );
+        assert!(
+            (s.logical_width() - crate::ui::layout::PEEK_W_REF).abs() < 0.06,
+            "must settle on exactly 185: {}",
+            s.logical_width()
         );
     }
 }
