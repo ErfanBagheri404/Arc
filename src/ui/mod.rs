@@ -794,12 +794,6 @@ pub fn build(state: &ViewState) -> Frame {
         scene.push(bar);
     }
 
-    // 3b. Collapsed progress arc: a ring around the pill (Dynamic-Island /
-    //     VNotch style). Fades on the same curve as the inline bar so the
-    //     panel never shows two progress indicators at once.
-    if let Some(arc) = pill_progress_arc(fw, fh, state, glyph_opacity) {
-        scene.push(arc);
-    }
 
     // 4. Mic-in-use dot: a standing indicator, not a HUD. It sits at the pill's
     //    right edge, clear of the centred glyph, and fades with the same curve.
@@ -985,32 +979,6 @@ fn pill_progress(fw: f32, fh: f32, state: &ViewState, opacity: f32) -> Option<No
     })
 }
 
-/// Collapsed-pill progress arc: a ring around the pill (Dynamic-Island /
-/// VNotch style). Returns `None` when nothing is playing, the island is
-/// opening, or the duration is unknown.
-fn pill_progress_arc(fw: f32, fh: f32, state: &ViewState, opacity: f32) -> Option<Node> {
-    let m = &state.media;
-    if opacity <= 0.0 || !m.playing {
-        return None;
-    }
-    let span = m.duration?.as_secs_f32();
-    if span <= 0.0 {
-        return None;
-    }
-    let frac = (m.position.as_secs_f32() / span).clamp(0.0, 1.0);
-    let fill = if state.accent_progress {
-        m.accent.unwrap_or(Rgba::WHITE)
-    } else {
-        Rgba::WHITE
-    };
-    Some(Node::Arc {
-        rect: put(fw, fh, Rect::new(0.0, 0.0, fw, fh)),
-        progress: frac,
-        track: layout::fade(Rgba::rgba(0.29, 0.29, 0.31, 1.0), opacity),
-        fill: layout::fade(fill, opacity),
-        thickness: 2.5,
-    })
-}
 /// Clamp a rect into the frame. Every emitted rect goes through here, which is
 ///
 /// This matters because the island is mid-spring: the window can be far smaller
@@ -1957,15 +1925,15 @@ mod tests {
                 .any(|n| matches!(n, Node::Text { text, .. } if text == "Late Night Drive")),
             "the playing pill must show the track title"
         );
-        // 1 body + 6 row nodes + 3 bar group nodes + 1 progress arc.
-        assert_eq!(all_nodes(&f).len(), 1 + 6 + 3 + 1);
+        // 1 body + 6 row nodes + 3 bar group nodes.
+        assert_eq!(all_nodes(&f).len(), 1 + 6 + 3);
         // Live stream with unknown duration: no bar to pin at zero.
         v.media.duration = None;
         assert_eq!(all_nodes(&build(&v)).len(), 1 + 6);
     }
 
     #[test]
-    fn collapsed_pill_draws_a_progress_arc_only_while_playing() {
+    fn collapsed_pill_draws_no_ring_ever() {
         let mut v = view_sized(PILL_W_REF, PILL_H_REF);
         v.pet = None;
         v.media.duration = Some(std::time::Duration::from_secs(60));
@@ -1977,17 +1945,11 @@ mod tests {
         );
         v.media.playing = true;
         v.media.position = std::time::Duration::from_secs(30);
-        let arc = all_nodes(&build(&v))
-            .into_iter()
-            .find_map(|n| match n {
-                Node::Arc { progress, rect, .. } => Some((progress, rect)),
-                _ => None,
-            })
-            .expect("playing pill must ring itself");
-        assert!((arc.0 - 0.5).abs() < 1e-3, "half-way through: {}", arc.0);
         assert!(
-            arc.1.w <= PILL_W_REF + 0.5 && arc.1.h <= PILL_H_REF + 0.5,
-            "ring escapes the pill"
+            !all_nodes(&build(&v))
+                .iter()
+                .any(|n| matches!(n, Node::Arc { .. })),
+            "the playing pill must not ring itself"
         );
     }
 
