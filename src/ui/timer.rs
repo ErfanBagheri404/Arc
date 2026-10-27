@@ -33,6 +33,19 @@ pub fn buttons(fw: f32, top: f32) -> Vec<Rect> {
         .collect()
 }
 
+/// A preset's label: the long form ("15 min") when the button can hold it, the
+/// short one ("15m") in the Time tab's narrow left column, where "15 min" would
+/// ellipsis. Width-driven, so the full-width layout keeps its wording.
+fn short_label(secs: u32, w: f32) -> String {
+    let long = preset_label(secs);
+    let style = TextStyle::numeric(12.0);
+    if measure(&long, &style) + 12.0 <= w {
+        long
+    } else {
+        format!("{}m", secs / 60)
+    }
+}
+
 /// The Timer tab's content, laid out under `top`.
 pub fn content(fw: f32, fh: f32, top: f32, timer: &Timer) -> Vec<Node> {
     let mut out = Vec::new();
@@ -49,7 +62,7 @@ pub fn content(fw: f32, fh: f32, top: f32, timer: &Timer) -> Vec<Node> {
             },
         });
         let style = TextStyle::numeric(12.0);
-        let label = preset_label(PRESETS[i]);
+        let label = short_label(PRESETS[i], r.w);
         let w = measure(&label, &style).max(1.0);
         let lh = line_height(&style);
         out.push(Node::Text {

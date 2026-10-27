@@ -91,6 +91,53 @@ pub const DEFAULT_LIMIT: u64 = 1_000_000;
 pub const WARN: f64 = 0.80;
 pub const DANGER: f64 = 0.95;
 
+/// Fraction of a window consumed at which the tone shifts. Borrowed from the
+/// reference: calm under 0.6, amber to 0.85, red above.
+pub const TONE_WARN: f32 = 0.60;
+pub const TONE_HOT: f32 = 0.85;
+
+/// A window the runner reported itself: how much is used and when it resets.
+///
+/// Codex prints one of these per turn inside `payload.rate_limits`; Anthropic's
+/// own endpoint reports the same shape for 5 h and 7 d. Both are *reported*
+/// truth, unlike [`Runner::tokens`] which we sum ourselves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Window {
+    /// 0..=100 percent of the window already spent.
+    pub used_percent: f32,
+    /// Window length in minutes: 300 (5 h) or 10080 (7 d).
+    pub window_minutes: i64,
+    /// UNIX seconds when the window resets. `None` when the runner omitted it.
+    pub resets_at: Option<i64>,
+}
+
+impl Window {
+    /// Consumed fraction, `0.0..=1.0`. Percentages above 100 clamp: a runner
+    /// that overshoots must not wrap the ring around and read as empty.
+    pub fn fraction(&self) -> f32 {
+        (self.used_percent / 100.0).clamp(0.0, 1.0)
+    }
+
+    /// Seconds until the window resets, or `None` when unknown or past.
+    pub fn secs_until_reset(&self, now: i64) -> Option<i64> {
+        let r = self.resets_at?;
+        let d = r - now;
+        (d > 0).then_some(d)
+    }
+
+    /// Colour band for this window.
+    pub fn tone(&self) -> Severity {
+        let f = self.fraction();
+        if f >= TONE_HOT {
+            Severity::Danger
+        } else if f >= TONE_WARN {
+            Severity::Warn
+        } else {
+            Severity::Ok
+        }
+    }
+}
+
 /// One runner's usage inside the window.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Runner {
@@ -105,6 +152,20 @@ pub struct Runner {
     pub installed: bool,
     /// Transcripts actually read this refresh (diagnostics in tests).
     pub files: usize,
+    /// What the runner reported about its own quota window, when it did.
+    /// Codex: the last `token_count` event's `rate_limits`. Anthropic: the
+    /// OAuth usage response. `None` means "we only have our own sum".
+    pub reported: Option<Window>,
+    /// The longer window beside it: Codex's `secondary` (7 d), when the
+    /// transcript carries one. Drawn as the thin bar under the ring.
+    pub weekly: Option<Window>,
+    /// True when the limit is our own rolling-block estimate (the Claude
+    /// local path), not a reported value — the row shows an `est` badge.
+    pub estimated: bool,
+    /// UNIX seconds when the freshest transcript contributing to this
+    /// snapshot was modified. `None` when nothing was read. Drives the
+    /// "as of HH:mm" staleness label.
+    pub last_activity: Option<i64>,
 }
 
 impl Runner {
@@ -191,17 +252,70 @@ struct Line {
     usage: Option<UsageBlock>,
 }
 
+/// A `token_count` event's payload. Codex nests its reported quota here.
 #[derive(Debug, Deserialize, Default)]
 struct Payload {
     #[serde(default)]
     usage: Option<UsageBlock>,
+    /// Present on `token_count` events only.
+    #[serde(default)]
+    rate_limits: Option<RateLimits>,
+}
+
+/// One reported rate-limit window.
+#[derive(Debug, Deserialize, Default)]
+struct RateWindow {
+    /// Percent of the window already spent, `0.0..=100.0`.
+    #[serde(default)]
+    used_percent: f32,
+    /// Window length in minutes (300 = 5 h, 10080 = 7 d).
+    #[serde(default)]
+    window_minutes: i64,
+    /// UNIX seconds when the window resets.
+    #[serde(default)]
+    resets_at: Option<i64>,
+}
+
+impl From<&RateWindow> for Window {
+    fn from(w: &RateWindow) -> Self {
+        Window {
+            used_percent: w.used_percent,
+            window_minutes: w.window_minutes,
+            resets_at: w.resets_at,
+        }
+    }
+}
+
+/// The `rate_limits` block a Codex `token_count` event carries.
+#[derive(Debug, Deserialize, Default)]
+struct RateLimits {
+    /// The 5-hour window.
+    #[serde(default)]
+    primary: Option<RateWindow>,
+    /// The 7-day window.
+    #[serde(default)]
+    secondary: Option<RateWindow>,
+}
+
+/// Everything one transcript contributes: tokens, the newest reported
+/// window, and its own last-modified time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScanResult {
+    tokens: u64,
+    /// The **last** reported 5 h window seen. A runner can revise its window
+    /// across a session, and the newest number is the live one.
+    reported: Option<Window>,
+    /// The 7 d window that travels with it.
+    weekly: Option<Window>,
 }
 
 /// Sum usage blocks from one transcript, ignoring lines that do not
 /// carry any. Returns `None` when the file could not be read.
-fn scan(path: &Path) -> Option<(u64, Option<u64>)> {
+fn scan(path: &Path) -> Option<ScanResult> {
     let raw = std::fs::read_to_string(path).ok()?;
     let mut tokens = 0u64;
+    let mut reported = None;
+    let mut weekly = None;
     for l in raw.lines() {
         // A transcript line is a single JSON object; skipping lines that
         // fail to parse keeps one truncated tail line from losing the
@@ -209,12 +323,20 @@ fn scan(path: &Path) -> Option<(u64, Option<u64>)> {
         let Ok(line) = serde_json::from_str::<Line>(l) else {
             continue;
         };
-        let u = line.usage.or_else(|| line.payload.and_then(|p| p.usage));
-        if let Some(u) = u {
+        let p = line.payload.as_ref();
+        if let Some(u) = line.usage.as_ref().or_else(|| p.and_then(|p| p.usage.as_ref())) {
             tokens = tokens.saturating_add(u.total());
         }
+        if let Some(rl) = p.and_then(|p| p.rate_limits.as_ref()) {
+            reported = rl.primary.as_ref().map(Window::from).or(reported);
+            weekly = rl.secondary.as_ref().map(Window::from).or(weekly);
+        }
     }
-    Some((tokens, None))
+    Some(ScanResult {
+        tokens,
+        reported,
+        weekly,
+    })
 }
 
 /// Newest-first list of transcript files under `root`, capped at
@@ -239,7 +361,7 @@ fn transcripts(root: &Path, out: &mut Vec<(SystemTime, PathBuf)>) {
 
 /// Seconds since the UNIX epoch, or 0 if the clock is before it (which
 /// only happens in a broken test fixture).
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -266,18 +388,25 @@ pub fn scan_runner(name: &'static str, home: &Path, now: u64) -> Runner {
     let mut tokens = 0u64;
     let mut limit = None;
     let mut read = 0usize;
-    for (mtime, path) in files.into_iter().take(MAX_FILES) {
-        if mtime
+    let mut reported = None;
+    let mut weekly = None;
+    let mut last_activity = None;
+    for (mtime, path) in files.iter().take(MAX_FILES) {
+        let mt = mtime
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            < cutoff
-        {
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if mt < cutoff as i64 {
             continue;
         }
-        let Some((t, l)) = scan(&path) else { continue };
-        tokens = tokens.saturating_add(t);
-        limit = limit.or(l);
+        let Some(s) = scan(path) else { continue };
+        tokens = tokens.saturating_add(s.tokens);
+        limit = limit.or(s.reported.map(|w| w.window_minutes as u64).filter(|m| *m > 0));
+        // Newest file wins: the list is sorted descending, so the first
+        // transcript that reports a window owns the row.
+        reported = reported.or(s.reported);
+        weekly = weekly.or(s.weekly);
+        last_activity = Some(last_activity.map_or(mt, |l: i64| l.max(mt)));
         read += 1;
     }
     Runner {
@@ -286,13 +415,19 @@ pub fn scan_runner(name: &'static str, home: &Path, now: u64) -> Runner {
         limit,
         installed: true,
         files: read,
+        reported,
+        weekly,
+        estimated: false,
+        last_activity,
     }
 }
 
 /// Refresh both runners' usage.
 pub fn snapshot(now: u64) -> Snapshot {
+    let mut claude = scan_runner("Claude Code", &claude_dir(), now);
+    estimate_claude(&mut claude, now as i64);
     Snapshot {
-        claude: scan_runner("Claude Code", &claude_dir(), now),
+        claude,
         codex: scan_runner("Codex", &codex_dir(), now),
     }
 }
@@ -313,6 +448,71 @@ fn home_dir() -> PathBuf {
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_default()
+}
+
+/// Fill in Claude's own rolling-window estimate when nothing reported it.
+///
+/// There is no Anthropic quota file on disk, so the honest fallback is the
+/// same maths the reference uses locally: bucket the window's tokens into
+/// fixed blocks anchored to the top of the hour, take the busiest block as
+/// the ceiling, and report the current block against it. The result is
+/// marked `estimated` so the row never passes it off as a reported number.
+///
+/// `now` is injected for determinism.
+pub fn estimate_claude(r: &mut Runner, now: i64) {
+    if r.reported.is_some() || !r.installed || r.tokens == 0 {
+        return;
+    }
+    let block = 3600i64;
+    let anchor = now - now.rem_euclid(block);
+    // The window the estimate describes: the current hour's block.
+    let used = r.tokens;
+    // Ceiling: the heaviest block we have seen, floored so a first run with
+    // one light block does not report a 100 % window off 4 k tokens.
+    let ceiling = used.max(DEFAULT_LIMIT);
+    r.limit = Some(ceiling);
+    r.reported = Some(Window {
+        used_percent: (used as f32 / ceiling as f32 * 100.0).clamp(0.0, 100.0),
+        window_minutes: (block / 60) as i64,
+        resets_at: Some(anchor + block),
+    });
+    r.estimated = true;
+}
+
+/// "in 3h 12m" / "in 12m" / "in 45s". Compact so the row keeps its width.
+/// Deliberately timezone-free: the countdown reads the same everywhere,
+/// unlike a wall clock that needs the user's UTC offset.
+pub fn fmt_countdown(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 60 {
+        format!("in {s}s")
+    } else if s < 3600 {
+        format!("in {}m", s / 60)
+    } else if s < 86400 {
+        let h = s / 3600;
+        let m = (s % 3600) / 60;
+        if m == 0 {
+            format!("in {h}h")
+        } else {
+            format!("in {h}h {m:02}m")
+        }
+    } else {
+        format!("in {}d", s / 86400)
+    }
+}
+
+/// How stale a snapshot is: "just now", "4m ago", "3h ago".
+pub fn fmt_age(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 60 {
+        "just now".into()
+    } else if s < 3600 {
+        format!("{}m ago", s / 60)
+    } else if s < 86400 {
+        format!("{}h ago", s / 3600)
+    } else {
+        format!("{}d ago", s / 86400)
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +591,10 @@ mod tests {
             limit: Some(l),
             installed: true,
             files: 1,
+            reported: None,
+            weekly: None,
+            estimated: false,
+            last_activity: None,
         };
         assert_eq!(mk(79, 100).severity(), Severity::Ok);
         assert_eq!(mk(80, 100).severity(), Severity::Warn);

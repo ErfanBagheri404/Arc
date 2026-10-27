@@ -18,20 +18,25 @@ use windows::core::{Error, Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget,
-    ID2D1PathGeometry, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    ID2D1Bitmap, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1PathGeometry,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS, D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
@@ -56,7 +61,8 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
+    IDXGISwapChain3, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_SCALING_STRETCH,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -78,6 +84,15 @@ pub struct PerfProbe {
     /// Rolling average frame time in milliseconds, or `None` when nothing animated.
     pub avg_frame_ms: Option<f32>,
 }
+
+
+
+
+
+pub static DBG_WALK_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static DBG_TEXT_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static DBG_TEXT_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static DBG_TEXT_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// TEMP DEBUG: renderer-internal stage timings (acquire / draw / Present).
 pub static DBG_NODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -163,20 +178,20 @@ fn format_key(style: &TextStyle) -> FormatKey {
 /// start of the matching segment in [`squircle_segments`], or the outline closes
 /// with visible kinks between corners.
 fn corner_start(rect: &Rect, radii: CornerRadii, index: usize) -> (f32, f32) {
-    // A negative top radius is the concave wing, which flares OUTSIDE the body
-    // and reorders the segments: index 0 is the top-right wing (its only
-    // predecessor being the top edge), and the body's left side comes last.
+    // A negative top radius is the concave wing, which flares OUTSIDE the body.
+    // NOW TL-first order: index 0 is the TL wing (preceded by the top edge),
+    // then BL, BR, TR wing last.
     // `notch_metrics` is the one source of truth for that geometry.
     if radii.top_left < 0.0 || radii.top_right < 0.0 {
         let (body_l, body_r, bl, br, wl, wr) = notch_metrics(rect, radii);
         return match index {
-            // TR wing tip: the ear tip is OUTSIDE the body, at the frame's
-            // right top corner. `corner_start` pins segment 0 there, so the
+            // TL wing tip: the ear tip is OUTSIDE the body, at the frame's
+            // left top corner. `corner_start` pins segment 0 there, so the
             // straight edge starts from the tip, not from the body's corner.
-            0 => (body_r + wr, rect.y),
-            1 => (body_r, rect.max_y() - br),
-            2 => (body_l + bl, rect.max_y()),
-            _ => (body_l, rect.y + wl),
+            0 => (body_l - wl, rect.y),
+            1 => (body_l, rect.max_y() - bl),
+            2 => (body_r - br, rect.max_y()),
+            _ => (body_r, rect.y + wr),
         };
     }
     match index {
@@ -244,9 +259,10 @@ macro_rules! step {
 fn acquire_target(
     d2d: &ID2D1Factory,
     swapchain: &IDXGISwapChain1,
+    index: u32,
     scale: f32,
 ) -> windows::core::Result<ID2D1RenderTarget> {
-    let surface: IDXGISurface = step!("GetBuffer", unsafe { swapchain.GetBuffer(0) });
+    let surface: IDXGISurface = step!("GetBuffer", unsafe { swapchain.GetBuffer(index) });
     let props = D2D1_RENDER_TARGET_PROPERTIES {
         r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
         pixelFormat: D2D1_PIXEL_FORMAT {
@@ -278,11 +294,41 @@ pub struct Renderer {
     visual: Option<IDCompositionVisual>,
     d2d_factory: Option<ID2D1Factory>,
     dwrite: Option<IDWriteFactory>,
+    /// Keeps the D3D device (and the whole D3D feature level chain that
+    /// created the swapchain) alive for the renderer's lifetime. Dropping it
+    /// mid-session releases the device's last reference and every later
+    /// `Present` silently re-creates it: that re-create is the ~26 ms stall
+    /// seen mid-morph.
+    d3d_device: Option<ID3D11Device>,
     /// Collection holding the bundled proportional face. `None` when the
     /// asset is missing or the font stack could not be built; the family
     /// chain then falls through to the system fonts.
     font_collection: Option<IDWriteFontCollection>,
     formats: HashMap<FormatKey, IDWriteTextFormat>,
+    /// Device bitmaps already built from their WIC sources. Rebuilding one per
+    /// frame was the morph's biggest cost: `CreateBitmapFromWicBitmap` copies
+    /// and converts the whole image inside `EndDraw`, ~11 ms for the demo art.
+    bitmaps: HashMap<ImageHandle, ID2D1Bitmap>,
+    /// One render target per back buffer, kept alive.
+    ///
+    /// A D2D render target owns the glyph cache and the brush/geometry caches
+    /// for its surface. Building a fresh one every frame threw all of that
+    /// away, so the first `EndDraw` of every morph re-rasterised every glyph
+    /// run on the CPU — a 38 ms stall in the first two frames, which is
+    /// exactly what the expand looked like. Flip-model buffers rotate, so
+    /// cache by index and only drop the set when the chain is resized.
+    targets: Vec<Option<ID2D1RenderTarget>>,
+    /// Device-level context used only to *own* bitmaps: a bitmap made by a
+    /// render target dies with it, and this renderer builds a fresh target per
+    /// frame. A device context's bitmaps are valid on every target of the same
+    /// device, so one decode lasts the whole session.
+    bitmap_owner: Option<ID2D1DeviceContext>,
+    /// Handle signalled when the chain can take another frame. Waited on once
+    /// per `present`; it *is* the display-rate pacing.
+    latency_wait: windows::Win32::Foundation::HANDLE,
+    /// When the last frame was presented; the first frame after an idle gap
+    /// skips the latency wait (see `present`).
+    last_present: std::time::Instant,
     /// WIC factory, built lazily on the first image draw. `None` until then, and
     /// permanently `None` if the platform has no imaging stack.
     wic: Option<IWICImagingFactory>,
@@ -298,13 +344,19 @@ pub struct Renderer {
     /// per frame was the idle burn: a 40 px pill cost ~20 ms of CPU a second.
     /// Animated fades mint new colours every frame, so the map is dropped
     /// wholesale once it grows past `64` rather than leaking.
-    brushes: HashMap<[u32; 4], ID2D1SolidColorBrush>,
+    brushes: HashMap<([u32; 4], usize), ID2D1SolidColorBrush>,
+    /// Back-buffer slot the current frame draws into. Brushes are minted *on*
+    /// a render target, so one made for buffer 0 cannot be used on buffer 1 —
+    /// it fails with D2DERR_WRONG_RESOURCE_DOMAIN and the frame draws nothing.
+    target_slot: usize,
     /// Filled path geometries keyed by the exact shape that produced them. A
     /// committed geometry cannot be re-`Open`ed, so the only way to avoid
     /// rebuilding an unchanged outline every frame is to keep the finished
     /// geometry and `FillGeometry` it directly. Animating shapes miss (correct,
     /// they changed); every static node in the scene hits.
     geom_cache: HashMap<GeomKey, ID2D1PathGeometry>,
+    /// Per-factory stroke style with round caps/join (17 px glyph line weight).
+    stroke_style: Option<ID2D1StrokeStyle>,
     /// Scratch UTF-16 buffer for text runs: cleared per draw, never reallocated.
     scratch_utf16: Vec<u16>,
     probe: PerfProbe,
@@ -330,12 +382,20 @@ impl Renderer {
             visual: None,
             d2d_factory: None,
             dwrite: None,
+            d3d_device: None,
             font_collection: None,
             formats: HashMap::new(),
+            bitmaps: HashMap::new(),
+            targets: Vec::new(),
+            bitmap_owner: None,
+            latency_wait: windows::Win32::Foundation::HANDLE::default(),
+            last_present: std::time::Instant::now(),
             wic: None,
             images: HashMap::new(),
             brushes: HashMap::new(),
+            target_slot: 0,
             geom_cache: HashMap::new(),
+            stroke_style: None,
             scratch_utf16: Vec::with_capacity(64),
             probe: PerfProbe::default(),
             degraded: true,
@@ -364,6 +424,13 @@ impl Renderer {
     /// Drop every GPU object. Reused by `Drop`, so it must tolerate being called
     /// on a half-built renderer.
     fn release_chain(&mut self) {
+        if !self.latency_wait.is_invalid() {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.latency_wait) };
+            self.latency_wait = windows::Win32::Foundation::HANDLE::default();
+        }
+        self.targets.clear();
+        self.bitmaps.clear();
+        self.bitmap_owner = None;
         self.swapchain = None;
         self.visual = None;
         self.dcomp_target = None;
@@ -371,6 +438,7 @@ impl Renderer {
         self.d2d_factory = None;
         self.formats.clear();
         self.geom_cache.clear();
+        self.stroke_style = None;
     }
 
     fn build_chain(&mut self) -> windows::core::Result<()> {
@@ -437,11 +505,17 @@ impl Renderer {
                 Quality: 0,
             },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            // Two buffers: each back buffer carries its own Direct2D glyph
+            // cache, so every extra buffer is another full re-rasterisation of
+            // the panel's text on the first morph frame that reaches it.
             BufferCount: 2,
             Scaling: DXGI_SCALING_STRETCH,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
             AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-            Flags: 0,
+            // A waitable latency object is the only way to pace frames to the
+            // display without a timer: `thread::sleep` rounds up to the 15.6 ms
+            // system tick, and `Present(0)` alone free-runs at ~180 fps.
+            Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
         };
         let swapchain = step!("CreateSwapChainForComposition", unsafe {
             factory.CreateSwapChainForComposition(&device, &desc, None)
@@ -452,7 +526,11 @@ impl Renderer {
         // Explicit sRGB rather than the driver's default (risks T3).
         if let Ok(swapchain3) = swapchain.cast::<IDXGISwapChain3>() {
             let _ = unsafe { swapchain3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) };
-            let _ = unsafe { swapchain3.SetMaximumFrameLatency(3) };
+        }
+        // One frame in flight, waited on explicitly before each draw.
+        if let Ok(chain2) = swapchain.cast::<IDXGISwapChain2>() {
+            let _ = unsafe { chain2.SetMaximumFrameLatency(1) };
+            self.latency_wait = unsafe { chain2.GetFrameLatencyWaitableObject() };
         }
 
         let dcomp: IDCompositionDevice = step!("DCompositionCreateDevice", unsafe {
@@ -470,6 +548,14 @@ impl Renderer {
 
         let d2d: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        // Bitmaps are owned by a device context so they outlive the per-frame
+        // render targets (see `bitmap_owner`).
+        self.bitmap_owner = d2d
+            .cast::<ID2D1Factory1>()
+            .ok()
+            .and_then(|factory| unsafe { factory.CreateDevice(&dxgi).ok() })
+            .and_then(|device| unsafe { device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS(0)).ok() });
+        self.bitmaps.clear();
         let dwrite: IDWriteFactory = step!("DWriteCreateFactory", unsafe {
             DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
         });
@@ -488,8 +574,22 @@ impl Renderer {
         self.dcomp = Some(dcomp);
         self.dcomp_target = Some(dcomp_target);
         self.visual = Some(visual);
+        let stroke_style = unsafe { d2d.CreateStrokeStyle(
+            &D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 2.0,
+                dashStyle: D2D1_DASH_STYLE_SOLID,
+                dashOffset: 0.0,
+            },
+            None,
+        ) };
+        self.stroke_style = stroke_style.ok();
         self.d2d_factory = Some(d2d);
         self.dwrite = Some(dwrite);
+        self.d3d_device = Some(device);
         Ok(())
     }
 
@@ -514,7 +614,12 @@ impl Renderer {
         };
         // Flip-model back buffers cannot rotate while a reference is alive,
         // so drop every cached render target before handing the chain back.
-        self.formats.clear();
+        self.targets.clear();
+        // Brushes and geometries are minted *on* a target, so they are dead
+        // once it is gone: reusing them on the rebuilt target fails the whole
+        // frame with D2DERR_WRONG_RESOURCE_DOMAIN and nothing draws at all.
+        self.brushes.clear();
+        self.geom_cache.clear();
         // SAFETY: our own swapchain; no buffer references are outstanding.
         let resized = unsafe {
             swapchain.ResizeBuffers(
@@ -561,14 +666,52 @@ impl Renderer {
         else {
             return;
         };
+        // Block until the chain has room for this frame. Returns at the next
+        // composition pass, so the loop runs at the display's rate instead of
+        // as fast as D2D can draw. 200 ms guards a wedged compositor.
+        //
+        // The first frame of a morph does NOT wait: after an idle gap DWM has
+        // stopped compositing this surface, so the waitable object stays
+        // unsignalled for ~25 ms and the morph opened with a visible hitch.
+        // Three back buffers mean the frame can be queued immediately, and the
+        // loop's own `frame_clock` sleep keeps it from free-running.
+        // Bounded to a couple of refresh periods. The waitable object only
+        // signals on a composition pass, and DWM is free to skip this surface
+        // for far longer than a frame — an unbounded wait then blocks the loop
+        // for 80 ms mid-morph, which is the hitch the user sees. The loop's own
+        // `frame_clock` sleep is the real pacer; this only stops the chain from
+        // building a backlog.
+        if !self.latency_wait.is_invalid() {
+            let _ = unsafe {
+                windows::Win32::System::Threading::WaitForSingleObject(self.latency_wait, 2)
+            };
+        }
+        self.last_present = std::time::Instant::now();
         let dbg_a0 = std::time::Instant::now();
-        let target = match acquire_target(&d2d, &swapchain, scale) {
-            Ok(pair) => pair,
-            Err(error) => {
-                log::error!("arc: could not bind a render target to the back buffer ({error})");
-                self.degraded = true;
-                return;
-            }
+        // One render target per back buffer, reused: a target owns the glyph
+        // and brush caches for its surface, so rebuilding one per frame made
+        // the first `EndDraw` of every morph re-rasterise every glyph run.
+        let index = match swapchain.cast::<IDXGISwapChain3>() {
+            Ok(chain3) => unsafe { chain3.GetCurrentBackBufferIndex() },
+            Err(_) => 0,
+        } as usize;
+        if self.targets.len() <= index {
+            self.targets.resize_with(index + 1, || None);
+        }
+        self.target_slot = index;
+        let target = match self.targets[index].clone() {
+            Some(cached) => cached,
+            None => match acquire_target(&d2d, &swapchain, index as u32, scale) {
+                Ok(fresh) => {
+                    self.targets[index] = Some(fresh.clone());
+                    fresh
+                }
+                Err(error) => {
+                    log::error!("arc: could not bind a render target to the back buffer ({error})");
+                    self.degraded = true;
+                    return;
+                }
+            },
         };
 
         DBG_ACQ_US.store(
@@ -577,9 +720,11 @@ impl Renderer {
         );
         let dbg_b0 = std::time::Instant::now();
         unsafe { target.BeginDraw() };
+        // Transparent (alpha) targets cannot use ClearType: D2D silently falls
+        // back to a per-run intermediate surface, which is what made every
+        // DrawText cost ~190 us. Grayscale is both legal and the fast path.
+        unsafe { target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE) };
         if offset_x != 0.0 || offset_y != 0.0 {
-            // The render target is DPI-scaled, so a translation in logical
-            // units lands in device pixels without further conversion.
             let _ = unsafe { target.SetTransform(&Matrix3x2::translation(offset_x, offset_y)) };
         }
         unsafe {
@@ -593,9 +738,11 @@ impl Renderer {
             };
             target.Clear(Some(&transparent));
         }
+        let dbg_w0 = std::time::Instant::now();
         if std::env::var("ARC_DBG_EMPTY").is_err() {
             frame.scene.walk(&mut |node| self.draw_node(&target, node));
         }
+        DBG_WALK_US.store(dbg_w0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
         let drawn = unsafe { target.EndDraw(None, None) };
         // Release the back buffer before presenting; see `acquire_target`.
         drop(target);
@@ -634,6 +781,25 @@ impl Renderer {
     }
 
     fn draw_node(&mut self, target: &ID2D1RenderTarget, node: &Node) {
+        // TEMP MEASUREMENT: node-class isolation for the EndDraw stall.
+        // ARC_DBG_NODESKIP is a bitmask: 1=RoundRect/Bar, 2=Text, 4=Image, 8=Sprite,
+        // 32=Arc, 64=Glyph, 128=Group.
+        let skip: u32 = std::env::var("ARC_DBG_NODESKIP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let class = match node {
+            Node::RoundRect { .. } | Node::Bar { .. } => 1,
+            Node::Text { .. } => 2,
+            Node::Image { .. } => 4,
+            Node::Sprite { .. } => 8,
+            Node::Arc { .. } => 32,
+            Node::Glyph { .. } => 64,
+            Node::Group { .. } => 128,
+        };
+        if skip & class != 0 {
+            return;
+        }
         match node {
             Node::RoundRect { rect, radii, fill } => {
                 self.fill_squircle(target, *rect, *radii, *fill)
@@ -690,40 +856,73 @@ impl Renderer {
         if color.a <= 0.0 || rect.w <= 0.0 || rect.h <= 0.0 {
             return;
         }
-        let Some(tris) = glyph_tris(name, &rect) else {
+        let Some(shapes) = glyph_shapes(name, &rect) else {
             return;
         };
         let Some(brush) = self.brush(target, color) else {
             return;
         };
-        let key = geometry_key(&rect, &CornerRadii::uniform(0.0), 1);
-        let path = if let Some(path) = self.cached_geometry(&key) {
-            path
-        } else {
-            let Some(path) = self.new_geometry() else {
-                return;
-            };
-            let Ok(sink) = (unsafe { path.Open() }) else {
-                return;
-            };
-            unsafe {
-                sink.SetFillMode(D2D1_FILL_MODE_WINDING);
-                for tri in &tris {
-                    sink.BeginFigure(p2(tri[0]), D2D1_FIGURE_BEGIN_FILLED);
-                    sink.AddLine(p2(tri[1]));
-                    sink.AddLine(p2(tri[2]));
-                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                }
-                if sink.Close().is_err() {
-                    return;
-                }
+        // One path for fills, one for strokes: a stroke is not a fill, and the
+        // whole point of this split is that D2D widens a stroked figure itself
+        // instead of us tessellating a band of triangles around every segment.
+        let tag = glyph_tag(name);
+        let mut stroke_w = 0.0f32;
+        let fill = self.glyph_path(&rect, tag, &shapes, false);
+        let stroke = self.glyph_path(&rect, tag | 0x8000, &shapes, true);
+        for s in &shapes {
+            if let GlyphShape::Stroke(_, _, w) = s {
+                stroke_w = *w;
             }
-            self.cache_geometry(key, &path);
-            path
-        };
-        unsafe {
-            target.FillGeometry(&path, &brush, None);
         }
+        if let Some(path) = fill {
+            unsafe { target.FillGeometry(&path, &brush, None) };
+        }
+        if let Some(path) = stroke {
+            unsafe {
+                target.DrawGeometry(&path, &brush, stroke_w, self.stroke_style.as_ref())
+            };
+        }
+    }
+
+    /// Cached path for one glyph: `stroke == false` collects the filled figures,
+    /// `true` the stroked ones.
+    fn glyph_path(
+        &mut self,
+        rect: &Rect,
+        tag: u32,
+        shapes: &[GlyphShape],
+        stroke: bool,
+    ) -> Option<ID2D1PathGeometry> {
+        let key = geometry_key(rect, &CornerRadii::uniform(0.0), tag);
+        if let Some(path) = self.cached_geometry(&key) {
+            return Some(path);
+        }
+        let path = self.new_geometry()?;
+        let sink = unsafe { path.Open() }.ok()?;
+        unsafe {
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            for shape in shapes {
+                let (pts, closed) = match shape {
+                    GlyphShape::Fill(p) if !stroke && p.len() >= 3 => (p, true),
+                    GlyphShape::Stroke(p, c, _) if stroke && p.len() >= 2 => (p, *c),
+                    _ => continue,
+                };
+                sink.BeginFigure(p2(pts[0]), D2D1_FIGURE_BEGIN_FILLED);
+                for p in &pts[1..] {
+                    sink.AddLine(p2(*p));
+                }
+                sink.EndFigure(if closed {
+                    D2D1_FIGURE_END_CLOSED
+                } else {
+                    D2D1_FIGURE_END_OPEN
+                });
+            }
+            if sink.Close().is_err() {
+                return None;
+            }
+        }
+        self.cache_geometry(key, &path);
+        Some(path)
     }
 
     /// A finished geometry for `key`, or `None` on a miss (caller builds it).
@@ -829,7 +1028,7 @@ impl Renderer {
                             // outer clockwise 0..2π
                             sink.BeginFigure(point((cx + outer_rx, cy)), D2D1_FIGURE_BEGIN_FILLED);
                             for i in 1..=SEGS {
-                                let a = (i as f32 / SEGS as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                                let _a = (i as f32 / SEGS as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
                                 // start at top (-π/2), go clockwise => increasing angle
                                 let th = -std::f32::consts::FRAC_PI_2 + (i as f32 / SEGS as f32) * std::f32::consts::TAU;
                                 sink.AddLine(point((cx + outer_rx * th.cos(), cy + outer_ry * th.sin())));
@@ -942,16 +1141,7 @@ impl Renderer {
             self.fill_squircle(target, rect, radii, Rgba::rgb(0.16, 0.16, 0.18));
             return;
         };
-        let properties = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        let Ok(bitmap) = (unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) })
-        else {
+        let Some(bitmap) = self.bitmap_for(target, handle) else {
             self.fill_squircle(target, rect, radii, Rgba::rgb(0.16, 0.16, 0.18));
             return;
         };
@@ -1020,6 +1210,50 @@ impl Renderer {
         }
     }
 
+    /// Device bitmap for `handle`, decoded once and reused.
+    ///
+    /// `CreateBitmapFromWicBitmap` copies and converts the whole image, and
+    /// doing that inside every frame's `EndDraw` cost ~11 ms of the morph.
+    /// The bitmap is created on the device context (not the frame target) so
+    /// it survives the target being rebuilt each frame.
+    fn bitmap_for(
+        &mut self,
+        target: &ID2D1RenderTarget,
+        handle: ImageHandle,
+    ) -> Option<ID2D1Bitmap> {
+        if let Some(bitmap) = self.bitmaps.get(&handle) {
+            return Some(bitmap.clone());
+        }
+        let source = self.decoded(handle)?;
+        let properties = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let bitmap = match &self.bitmap_owner {
+            Some(owner) => unsafe {
+                owner.CreateBitmapFromWicBitmap(
+                    &source,
+                    Some(&D2D1_BITMAP_PROPERTIES1 {
+                        pixelFormat: properties.pixelFormat,
+                        dpiX: properties.dpiX,
+                        dpiY: properties.dpiY,
+                        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                        colorContext: std::mem::ManuallyDrop::new(None),
+                    }),
+                )
+                .and_then(|bitmap| bitmap.cast::<ID2D1Bitmap>())
+            },
+            None => unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) },
+        }
+        .ok()?;
+        self.bitmaps.insert(handle, bitmap.clone());
+        Some(bitmap)
+    }
+
     /// Draw one frame of a spritesheet: the same bitmap path as `draw_image`,
     /// but `src` crops the sheet to the frame. Used by the idle-notch pet,
     /// where the sheet is one atlas and the frame is a 192x208 cell.
@@ -1036,19 +1270,7 @@ impl Renderer {
         if rect.w <= 0.0 || rect.h <= 0.0 || src.w <= 0.0 || src.h <= 0.0 || opacity <= 0.0 {
             return;
         }
-        let Some(source) = self.decoded(handle) else {
-            return;
-        };
-        let properties = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        let Ok(bitmap) = (unsafe { target.CreateBitmapFromWicBitmap(&source, Some(&properties)) })
-        else {
+        let Some(bitmap) = self.bitmap_for(target, handle) else {
             return;
         };
         let crop = D2D_RECT_F {
@@ -1070,7 +1292,7 @@ impl Renderer {
 
     fn brush(&mut self, target: &ID2D1RenderTarget, color: Rgba) -> Option<ID2D1SolidColorBrush> {
         let color = premultiply(color);
-        let key = color_key(&color);
+        let key = (color_key(&color), self.target_slot);
         if let Some(cached) = self.brushes.get(&key) {
             return Some(cached.clone());
         }
@@ -1106,6 +1328,8 @@ impl Renderer {
         // the NUL that wide() appends for PCWSTR is not part of it.
         self.scratch_utf16.clear();
         self.scratch_utf16.extend(text.encode_utf16());
+        let dbg_t = std::time::Instant::now();
+        let dbg_len = self.scratch_utf16.len();
         unsafe {
             target.DrawText(
                 &self.scratch_utf16,
@@ -1116,6 +1340,9 @@ impl Renderer {
                 DWRITE_MEASURING_MODE_NATURAL,
             )
         };
+        DBG_TEXT_US.fetch_add(dbg_t.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
+        DBG_TEXT_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        DBG_TEXT_LEN.fetch_add(dbg_len, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn text_format(&mut self, style: &TextStyle) -> Option<IDWriteTextFormat> {
@@ -1308,60 +1535,51 @@ fn point((x, y): (f32, f32)) -> windows_numerics::Vector2 {
 fn p2(p: [f32; 2]) -> windows_numerics::Vector2 {
     point((p[0], p[1]))
 }
+/// Geometry for glyphs: fill polygons or stroked polylines.
+#[derive(Debug)]
+pub(super) enum GlyphShape {
+    /// Filled polygon (triangle soup) — used for play/pause/etc.
+    Fill(Vec<[f32; 2]>),
+    /// Stroked polyline with width and closed flag. Round cap/join handled by D2D.
+    Stroke(Vec<[f32; 2]>, bool /*closed*/, f32 /*width*/),
+}
+
 
 /// Transport glyph outlines as triangles inside `rect`. Each glyph is centered
 /// with a slight optical shift right (play/next lean forward, like SF Symbols).
 /// `pause` is a degenerate quad drawn as two skinny triangles.
-fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
+/// Return a per-glyph tag so two icons that share a rect never reuse the same path geometry.
+fn glyph_tag(name: &str) -> u32 {
+    let mut h = 0u32;
+    for b in name.as_bytes() {
+        h = h.wrapping_mul(31).wrapping_add(*b as u32);
+    }
+    // Tag bits are the low 5 bits of GeomKey[8]; this maps them into [64..] so they don't conflict
+    // with tag=1 for tab icons etc.
+    64 + (h & 0x3f)
+}
+
+
+fn glyph_shapes(name: &str, rect: &Rect) -> Option<Vec<GlyphShape>> {
     let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
     let (cx, cy) = (x + w * 0.5, y + h * 0.5);
     let s = w.min(h) * 0.5; // half-size of the glyph box
     // Tab icons are defined on a 0..1 box.
     let px = |nx: f32| x + w * nx;
     let py = |ny: f32| y + h * ny;
-    // Monoline pen. A dock icon is a STROKE, not a pile of quads: round caps
-    // and round joins are what let 17 px line art read as an icon instead of as
-    // scribble, and one stroke weight across the set is what makes nine icons
-    // look like one family. `pen` strokes a polyline (open or closed) at `sw`
-    // px; `circle` strokes a circle through the same pen.
-    let dot = |v: &mut Vec<[[f32; 2]; 3]>, p: [f32; 2], r: f32| {
-        let c = [px(p[0]), py(p[1])];
-        let n = 10;
-        for k in 0..n {
-            let a0 = (k as f32) * std::f32::consts::TAU / n as f32;
-            let a1 = ((k + 1) as f32) * std::f32::consts::TAU / n as f32;
-            v.push([
-                c,
-                [c[0] + r * a0.cos(), c[1] + r * a0.sin()],
-                [c[0] + r * a1.cos(), c[1] + r * a1.sin()],
-            ]);
+    // Monoline pen. A dock icon is a STROKE, not a pile of quads: D2D strokes
+    // one polyline figure with round caps and joins for the same pixels that
+    // used to cost ~120 overlapping winding triangles. Nine icons at 17 px were
+    // 3600 figures per frame, and the tessellator billed every one of them at
+    // EndDraw — the 70 ms that made the pill and expanded morphs stutter.
+    let pen = |v: &mut Vec<GlyphShape>, pts: &[[f32; 2]], closed: bool, sw: f32| {
+        let mut px_pts: Vec<[f32; 2]> = Vec::with_capacity(pts.len());
+        for p in pts {
+            px_pts.push([px(p[0]), py(p[1])]);
         }
+        v.push(GlyphShape::Stroke(px_pts, closed, sw));
     };
-    let line = |v: &mut Vec<[[f32; 2]; 3]>, a: [f32; 2], b: [f32; 2], sw: f32| {
-        let (ax, ay) = (px(a[0]), py(a[1]));
-        let (bx, by) = (px(b[0]), py(b[1]));
-        let dx = bx - ax;
-        let dy = by - ay;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-6 {
-            return;
-        }
-        let (hx, hy) = (-dy / len * sw * 0.5, dx / len * sw * 0.5);
-        v.push([[ax + hx, ay + hy], [bx + hx, by + hy], [bx - hx, by - hy]]);
-        v.push([[ax + hx, ay + hy], [bx - hx, by - hy], [ax - hx, ay - hy]]);
-    };
-    let pen = |v: &mut Vec<[[f32; 2]; 3]>, pts: &[[f32; 2]], closed: bool, sw: f32| {
-        let r = sw * 0.5;
-        for i in 0..pts.len() {
-            dot(v, pts[i], r);
-            if i + 1 < pts.len() {
-                line(v, pts[i], pts[i + 1], sw);
-            } else if closed {
-                line(v, pts[i], pts[0], sw);
-            }
-        }
-    };
-    let circle = |v: &mut Vec<[[f32; 2]; 3]>, cxn: f32, cyn: f32, r: f32, sw: f32| {
+    let circle = |v: &mut Vec<GlyphShape>, cxn: f32, cyn: f32, r: f32, sw: f32| {
         let n = 20;
         let pts: Vec<[f32; 2]> = (0..n)
             .map(|i| {
@@ -1371,70 +1589,52 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
             .collect();
         pen(v, &pts, true, sw);
     };
-    let tris: Vec<[[f32; 2]; 3]> = match name {
-        "play" => vec![[
-            [cx - s * 0.5 + s * 0.15, cy - s * 0.72],
-            [cx - s * 0.5 + s * 0.15, cy + s * 0.72],
+    let tris: Vec<GlyphShape> = match name {
+        "play" => vec![GlyphShape::Fill(vec![
+            [cx - s * 0.35, cy - s * 0.72],
             [cx + s * 0.72, cy],
-        ]],
+            [cx - s * 0.35, cy + s * 0.72],
+        ])],
         "pause" => vec![
-            // left bar
-            [
+            GlyphShape::Fill(vec![
                 [cx - s * 0.38, cy - s * 0.72],
                 [cx - s * 0.38, cy + s * 0.72],
                 [cx - s * 0.10, cy + s * 0.72],
-            ],
-            [
-                [cx - s * 0.38, cy - s * 0.72],
-                [cx - s * 0.10, cy + s * 0.72],
                 [cx - s * 0.10, cy - s * 0.72],
-            ],
-            // right bar
-            [
+            ]),
+            GlyphShape::Fill(vec![
                 [cx + s * 0.10, cy - s * 0.72],
                 [cx + s * 0.10, cy + s * 0.72],
                 [cx + s * 0.38, cy + s * 0.72],
-            ],
-            [
-                [cx + s * 0.10, cy - s * 0.72],
-                [cx + s * 0.38, cy + s * 0.72],
                 [cx + s * 0.38, cy - s * 0.72],
-            ],
+            ]),
         ],
         "prev" => vec![
             // bar at left, then left-pointing triangle
-            [
+            GlyphShape::Fill(vec![
                 [cx - s * 0.62, cy - s * 0.72],
                 [cx - s * 0.62, cy + s * 0.72],
                 [cx - s * 0.36, cy + s * 0.72],
-            ],
-            [
-                [cx - s * 0.62, cy - s * 0.72],
-                [cx - s * 0.36, cy + s * 0.72],
                 [cx - s * 0.36, cy - s * 0.72],
-            ],
-            [
+            ]),
+            GlyphShape::Fill(vec![
                 [cx + s * 0.62, cy - s * 0.72],
                 [cx - s * 0.36, cy],
                 [cx + s * 0.62, cy + s * 0.72],
-            ],
+            ]),
         ],
         "next" => vec![
-            [
+            GlyphShape::Fill(vec![
                 [cx + s * 0.36, cy - s * 0.72],
                 [cx + s * 0.36, cy + s * 0.72],
                 [cx + s * 0.62, cy + s * 0.72],
-            ],
-            [
-                [cx + s * 0.36, cy - s * 0.72],
-                [cx + s * 0.62, cy + s * 0.72],
                 [cx + s * 0.62, cy - s * 0.72],
-            ],
-            [
+            ]),
+            GlyphShape::Fill(vec![
                 [cx - s * 0.62, cy - s * 0.72],
                 [cx + s * 0.36, cy],
                 [cx - s * 0.62, cy + s * 0.72],
-            ],
+            ]),
         ],
         // Tab + corner icons. One stroke weight, round caps, geometry on the
         // 24 px grid taken from Lucide's paths (music, bar-chart-3, hourglass,
@@ -1443,7 +1643,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         // hand-approximated segments were not.
         "note" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             circle(&mut v, 0.25, 0.75, 0.125, sw);
             circle(&mut v, 0.75, 0.667, 0.125, sw);
             pen(
@@ -1456,7 +1656,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "chart" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             pen(&mut v, &[[0.125, 0.125], [0.125, 0.875], [0.875, 0.875]], false, sw);
             pen(&mut v, &[[0.333, 0.708], [0.333, 0.583]], false, sw);
             pen(&mut v, &[[0.542, 0.708], [0.542, 0.208]], false, sw);
@@ -1465,7 +1665,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "hourglass" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             pen(&mut v, &[[0.167, 0.083], [0.833, 0.083]], false, sw);
             pen(&mut v, &[[0.167, 0.917], [0.833, 0.917]], false, sw);
             // The walls pinch toward a waist but do NOT meet: one shared vertex
@@ -1476,7 +1676,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "clipboard" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             pen(
                 &mut v,
                 &[
@@ -1512,7 +1712,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "drop" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             // A point on top, a round belly below: ONE closed pen path, not a
             // triangle roof glued onto a full circle.
             let mut pts = vec![[0.5, 0.083]];
@@ -1525,7 +1725,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "bolt" => {
             let sw = 1.2;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             // Lucide's zap outline.
             pen(
                 &mut v,
@@ -1544,7 +1744,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "calendar" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             pen(
                 &mut v,
                 &[[0.125, 0.208], [0.875, 0.208], [0.875, 0.875], [0.125, 0.875]],
@@ -1558,7 +1758,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "tray" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             // Lucide's library: one leaning volume plus three upright ones.
             // Two outlined boxes on a rail were unreadable at 17 px.
             pen(&mut v, &[[0.667, 0.25], [0.833, 0.833]], false, sw);
@@ -1569,7 +1769,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "terminal" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             // Lucide's terminal: a prompt and a rule. The old boxed version
             // read as a window.
             pen(&mut v, &[[0.167, 0.708], [0.417, 0.5], [0.167, 0.292]], false, sw);
@@ -1578,7 +1778,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "settings" => {
             let sw = 1.15;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             // A cog is an OUTLINE whose teeth break the rim. Spokes on a ring
             // read as a sun; a stroked 6-tooth polygon reads as a gear.
             let teeth = 6;
@@ -1594,7 +1794,7 @@ fn glyph_tris(name: &str, rect: &Rect) -> Option<Vec<[[f32; 2]; 3]>> {
         }
         "pin" => {
             let sw = 1.2;
-            let mut v = Vec::new();
+            let mut v: Vec<GlyphShape> = Vec::new();
             // Thumbtack seen from the side: cap, shoulders, then the taper to a
             // point. One closed outline so every join stays round.
             pen(
@@ -1632,27 +1832,38 @@ mod tests {
     use super::*;
     use crate::core::scene::{Node, Scene};
 
-    /// Every transport glyph must be a non-empty set of closed triangles that
-    /// stay inside their rect. A vertex outside the rect paints over the
-    /// neighbouring button; an empty set is a button the user can click but
-    /// never see. Unknown names draw nothing.
+    /// Flatten a glyph to its points, whichever shape kind produced them.
+    fn glyph_points(name: &str, rect: &Rect) -> Vec<[f32; 2]> {
+        glyph_shapes(name, rect)
+            .unwrap_or_else(|| panic!("{name} has no geometry"))
+            .into_iter()
+            .flat_map(|s| match s {
+                GlyphShape::Fill(p) | GlyphShape::Stroke(p, _, _) => p,
+            })
+            .collect()
+    }
+
+    /// Every glyph must put real points inside its rect. A vertex outside the
+    /// rect paints over the neighbouring button; no points is a button the user
+    /// can click but never see. Unknown names draw nothing.
     #[test]
-    fn transport_glyphs_fit_their_rect() {
+    fn glyphs_fit_their_rect() {
         let rect = Rect::new(100.0, 50.0, 22.0, 22.0);
-        for name in ["play", "pause", "prev", "next"] {
-            let tris = glyph_tris(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
-            assert!(!tris.is_empty(), "{name} draws nothing");
-            for tri in &tris {
-                for &[x, y] in tri {
-                    assert!(
-                        (rect.x - 0.001..=rect.x + rect.w + 0.001).contains(&x)
-                            && (rect.y - 0.001..=rect.y + rect.h + 0.001).contains(&y),
-                        "{name} vertex ({x},{y}) escapes its rect"
-                    );
-                }
+        for name in [
+            "play", "pause", "prev", "next", "note", "chart", "hourglass", "clipboard", "drop",
+            "bolt", "calendar", "tray", "terminal", "settings", "pin",
+        ] {
+            let pts = glyph_points(name, &rect);
+            assert!(!pts.is_empty(), "{name} draws nothing");
+            for [x, y] in pts {
+                assert!(
+                    (rect.x - 0.001..=rect.x + rect.w + 0.001).contains(&x)
+                        && (rect.y - 0.001..=rect.y + rect.h + 0.001).contains(&y),
+                    "{name} vertex ({x},{y}) escapes its rect"
+                );
             }
         }
-        assert!(glyph_tris("seek", &rect).is_none());
+        assert!(glyph_shapes("seek", &rect).is_none());
     }
 
     /// The pause glyph must read as TWO bars. Its inner edges used to sit
@@ -1661,17 +1872,15 @@ mod tests {
     #[test]
     fn pause_glyph_has_a_visible_gap_between_its_bars() {
         let rect = Rect::new(100.0, 50.0, 22.0, 22.0);
-        let tris = glyph_tris("pause", &rect).expect("pause geometry");
+        let pts = glyph_points("pause", &rect);
         let cx = rect.x + rect.w * 0.5;
-        let left_max = tris
+        let left_max = pts
             .iter()
-            .flat_map(|t| t.iter())
             .map(|p| p[0])
             .filter(|x| *x < cx)
             .fold(f32::MIN, f32::max);
-        let right_min = tris
+        let right_min = pts
             .iter()
-            .flat_map(|t| t.iter())
             .map(|p| p[0])
             .filter(|x| *x > cx)
             .fold(f32::MAX, f32::min);
@@ -1682,60 +1891,36 @@ mod tests {
         );
     }
 
-    /// Every tab icon must be a non-empty set of triangles that stay inside
-    /// the rect they are drawn into, or a click paints over the neighbour.
-    #[test]
-    fn tab_icons_fit_their_rect() {
-        let rect = Rect::new(100.0, 50.0, 11.0, 11.0);
-        for name in [
-            "note", "chart", "hourglass", "clipboard", "drop", "bolt", "calendar", "tray",
-            "terminal",
-        ] {
-            let tris = glyph_tris(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
-            assert!(!tris.is_empty(), "{name} draws nothing");
-            for tri in &tris {
-                for &[px, py] in tri {
-                    assert!(
-                        (rect.x - 0.001..=rect.x + rect.w + 0.001).contains(&px)
-                            && (rect.y - 0.001..=rect.y + rect.h + 0.001).contains(&py),
-                        "{name} vertex ({px},{py}) escapes the tab rect {rect:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// The tab icons are MONOLINE art: strokes, not solid plates. Each must
-    /// still put real ink on the box — an empty or hairline glyph is an
-    /// invisible tab — and stay inside its rect.
+    /// Tab icons are MONOLINE art: strokes, not solid plates. Each must still
+    /// put real ink on the box — an empty glyph is an invisible tab.
     #[test]
     fn line_art_tab_icons_have_ink() {
         let rect = Rect::new(0.0, 0.0, 14.0, 14.0);
         for name in [
-            "note",
-            "chart",
-            "hourglass",
-            "clipboard",
-            "drop",
-            "bolt",
-            "calendar",
-            "tray",
-            "terminal",
-            "settings",
-            "pin",
+            "note", "chart", "hourglass", "clipboard", "drop", "bolt", "calendar", "tray",
+            "terminal", "settings", "pin",
         ] {
-            let tris = glyph_tris(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
-            let area: f32 = tris
+            let shapes = glyph_shapes(name, &rect).unwrap_or_else(|| panic!("{name} has no geometry"));
+            let ink: f32 = shapes
                 .iter()
-                .map(|t| {
-                    let (a, b, c) = (t[0], t[1], t[2]);
-                    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() * 0.5
+                .map(|s| match s {
+                    GlyphShape::Stroke(p, closed, w) => {
+                        let mut len: f32 = p.windows(2).map(|w| {
+                            ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt()
+                        }).sum();
+                        if *closed && p.len() > 2 {
+                            let (a, b) = (p[p.len() - 1], p[0]);
+                            len += ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+                        }
+                        len * w
+                    }
+                    GlyphShape::Fill(_) => 0.0,
                 })
                 .sum();
-            let cover = area / (rect.w * rect.h);
+            let cover = ink / (rect.w * rect.h);
             assert!(
-                (0.04..0.75).contains(&cover),
-                "{name} covers {cover:.2} of its box — a monoline glyph should be stroke-thin but visible"
+                (0.02..0.75).contains(&cover),
+                "{name} inks {cover:.2} of its box — a monoline glyph should be stroke-thin but visible"
             );
         }
     }

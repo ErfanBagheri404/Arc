@@ -38,21 +38,38 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_A,
     VK_Z,
 };
+use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowLongW, GetWindowRect, IsWindowVisible,
-    PeekMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
+    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
     GetClassNameW,
     SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE,
-    HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
+    HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS, WM_APP,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
-    WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT, SW_SHOWNOACTIVATE, WM_CHAR, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
+    WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND,    WM_HOTKEY, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SIZE,
     WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_MAXIMIZE, WS_POPUP,
 };
+
+/// TEMP hover-diag: WM_MOUSEMOVE hits on this thread's window.
+pub static DBG_MOUSEMOVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// TEMP hover-diag: WM_MOUSELEAVE hits.
+pub static DBG_MOUSELEAVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// TEMP hover-diag: WM_INPUT (raw mouse) hits.
+pub static DBG_RAWINPUT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// TEMP hover-diag: WM_NCHITTEST hits.
+pub static DBG_HITTEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// TEMP hover-diag: cursor x/y packed (low16=x, high16=y).
+pub static DBG_HOVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// TEMP hover-diag: body left (low16) / right (high16).
+pub static DBG_HOVER_R: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// TEMP hover-diag: body bottom edge.
+pub static DBG_HOVER_B: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 use super::dpi::Dpi;
 use super::{tray, Event};
@@ -64,6 +81,18 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// Window class name, registered once per process.
 const CLASS_NAME: &str = "ArcOverlayWindow";
+
+/// Posted by the `WM_INPUT` handler when a mouse move lands near the live
+/// body: raw input *queues* fine but does not break `MsgWaitForMultipleObjectsEx`
+/// (injected moves sat parked until the poll timeout on Win11), so the relay
+/// post is what actually wakes the parked loop. `WM_APP` window range is
+/// reserved for app-internal messages; the skew keeps it from tripping over
+/// any future `WM_APP` user.
+const WM_MOUSE_WAKE: u32 = WM_APP + 0x1A2C;
+/// How far (physical px) around the live body a mouse move still counts as
+/// hover-relevant for the wake relay. Generous: there is no harm in waking
+/// the loop slightly early — `pointer_over` is the decider.
+const WAKE_MARGIN_PX: i32 = 48;
 
 /// Hotkey id for Ctrl+Shift+A. `WM_HOTKEY` carries this in `wParam`.
 const HOTKEY_TOGGLE: i32 = 0xA1;
@@ -269,6 +298,38 @@ fn hit_body(x: i32, y: i32, inset: i32, width: i32, height: i32, offset_y: i32) 
     x >= inset && x < inset + width && y >= offset_y && y < offset_y + height
 }
 
+/// Relay a mouse move as a wake post when the cursor is near the live body.
+///
+/// Raw input arrives even though the collapsed window is click-through, but a
+/// queued `WM_INPUT` does not break `MsgWaitForMultipleObjectsEx` (measured on
+/// Win11: injected moves sat parked until the poll timeout), so the reliable
+/// wake is a posted message. This reads the same body rect `WM_NCHITTEST` uses
+/// (via `state`'s live fields) expanded by `WAKE_MARGIN_PX`; moves farther out
+/// are irrelevant to hover and get dropped, which keeps the relay from
+/// flooding the queue during ordinary desktop mouse use. When the cursor is
+/// *inside* the body the window is not click-through and regular
+/// `WM_MOUSEMOVE`s flow anyway — the relay is for the approach/leave frames.
+fn wake_if_near_body(hwnd: HWND) {
+    let mut p = POINT::default();
+    // SAFETY: `p` is a valid POINT for the call's duration.
+    if unsafe { GetCursorPos(&mut p) }.is_err() {
+        return;
+    }
+    let origin = client_origin(hwnd);
+    let (x, y) = (p.x - origin.0, p.y - origin.1);
+    if hit_body(
+        x,
+        y,
+        click_body_inset(hwnd) - WAKE_MARGIN_PX,
+        (click_body_width(hwnd) + 2 * WAKE_MARGIN_PX).max(1),
+        (click_body_height(hwnd) + 2 * WAKE_MARGIN_PX).max(1),
+        click_body_offset_y(hwnd) - WAKE_MARGIN_PX,
+    ) {
+        // SAFETY: our own HWND; a failed post only costs this wake.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_MOUSE_WAKE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
 /// `LPARAM`-packed client coordinates are a signed 16-bit pair.
 fn lparam_xy(lparam: LPARAM) -> (i16, i16) {
     let v = lparam.0 as u32;
@@ -456,7 +517,28 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        WM_INPUT => {
+            DBG_RAWINPUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Raw input is delivered even though the window is click-through,
+            // but a queued `WM_INPUT` does not break the `MsgWaitForMultiple-
+            // ObjectsEx` the loop parks on. Relay it instead: a posted message
+            // *does* break the wait, and posting one for every system-wide
+            // move would be spammy — so only moves that land near the live
+            // body get relayed (`wake_if_near_body`).
+            wake_if_near_body(hwnd);
+            // The docs require DefWindowProc for WM_INPUT so the raw buffer
+            // is released.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        WM_MOUSE_WAKE => {
+            // The relay itself carries no data: being in the queue is the
+            // signal, `pointer_over` on the next loop pass is the decider.
+            LRESULT(0)
+        }
+
         WM_MOUSEMOVE => {
+            DBG_MOUSEMOVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (x, y) = lparam_xy(lparam);
             push_event(
                 hwnd,
@@ -469,6 +551,7 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_MOUSELEAVE => {
+            DBG_MOUSELEAVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             push_event(hwnd, Event::CursorLeft);
             LRESULT(0)
         }
@@ -612,6 +695,31 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// Register the overlay HWND as a mouse raw-input sink (`RIDEV_INPUTSINK`).
+///
+/// Notifications only: raw input neither consumes nor reroutes anything, the
+/// normal window-message flow is untouched. Every mouse movement
+/// system-wide delivers a `WM_INPUT` here; because a queued `WM_INPUT` does
+/// not break `wait_for_input`'s park (see `WM_INPUT` in `wnd_proc`), the
+/// handler relays a post when the cursor is near the body. HID usages are
+/// fixed values from the USB spec (Generic Desktop page, Mouse usage); they
+/// are inlined because pulling in `Win32_Devices_HumanInterfaceDevice` for
+/// two `u16`s would be overkill.
+fn register_raw_mouse(hwnd: HWND) {
+    let devices = [RAWINPUTDEVICE {
+        usUsagePage: 0x0001, // HID_USAGE_PAGE_GENERIC
+        usUsage: 0x0002,     // HID_USAGE_GENERIC_MOUSE
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    }];
+    // SAFETY: `devices` is a valid array for the call's duration.
+    if let Err(err) =
+        unsafe { RegisterRawInputDevices(&devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32) }
+    {
+        log::error!("arc: RegisterRawInputDevices failed: {err:?}");
+    }
+}
+
 /// Owns the top-center overlay HWND.
 pub struct Overlay {
     hwnd: HWND,
@@ -623,6 +731,8 @@ pub struct Overlay {
     logical_size: (f32, f32),
     fullscreen: bool,
     last_fullscreen_poll: Instant,
+    /// False while a morph is running: the window region is only re-cut at rest.
+    settled: bool,
     hotkey_registered: bool,
 }
 
@@ -682,6 +792,17 @@ impl Overlay {
         // SAFETY: valid HWND owned by this process.
         unsafe { DragAcceptFiles(hwnd, true) };
 
+        // Raw mouse input sink: while collapsed the window answers
+        // `WM_NCHITTEST` with `HTTRANSPARENT` off the body, so it never
+        // receives `WM_MOUSEMOVE` and hover enter/leave had to wait out the
+        // park's poll interval — the "hover doesn't go to pill / stays pill"
+        // lag. The sink delivers `WM_INPUT` for every system-wide mouse move
+        // and its handler relays a wake post when the cursor is near the
+        // body; `pointer_over` (polled) stays the source of truth and
+        // resolves enter/leave within the same frame. Failure is logged
+        // inside and only degrades to the old poll cadence.
+        register_raw_mouse(hwnd);
+
         let mut overlay = Self {
             hwnd,
             dpi: Self::query_dpi(hwnd),
@@ -692,6 +813,7 @@ impl Overlay {
             logical_size: (0.0, 0.0),
             fullscreen: false,
             last_fullscreen_poll: Instant::now(),
+            settled: true,
             hotkey_registered: false,
         };
 
@@ -842,8 +964,11 @@ impl Overlay {
     }
 
     /// Is the cursor inside the window rect right now? Polled, not message-
-    /// driven: while collapsed the window is `WS_EX_TRANSPARENT`, so it never
-    /// receives `WM_MOUSEMOVE` and hover-dwell has nothing to listen to.
+    /// driven: while collapsed the window answers `WM_NCHITTEST` with
+    /// `HTTRANSPARENT` off the body, so it never receives `WM_MOUSEMOVE` and
+    /// hover-dwell has nothing to listen to. The raw-input sink's wake relay
+    /// only changes *when* this gets polled (on approach/leave it is right
+    /// after the move), this check stays the single source of truth.
     pub fn pointer_over(&self) -> bool {
         let mut p = POINT::default();
         // SAFETY: `p` is a valid POINT for the call's duration.
@@ -862,7 +987,19 @@ impl Overlay {
         let (l, r) = (rect.left + inset, rect.right - inset);
         let offset_y = self.state.body_offset_y.max(0);
         let bottom = rect.top + offset_y + self.state.body_height.max(1);
-        p.x >= l && p.x < r && p.y >= rect.top && p.y < bottom
+        let inside = p.x >= l && p.x < r && p.y >= rect.top && p.y < bottom;
+        if std::env::var("ARC_DBG_LOOP").is_ok() {
+            DBG_HOVER.store(
+                ((p.x as usize) & 0xffff) | (((p.y as usize) & 0xffff) << 16),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            DBG_HOVER_R.store(
+                (l as usize & 0xffff) | ((r as usize & 0xffff) << 16),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            DBG_HOVER_B.store(bottom as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+        inside
     }
 
     /// Live body size in physical px, for `ARC_DBG_LOOP` frame logs.
@@ -871,6 +1008,28 @@ impl Overlay {
     }
     pub fn body_height(&self) -> i32 {
         self.state.body_height
+    }
+
+    /// Park the loop until input arrives or `timeout` elapses.
+    ///
+    /// The idle loop used to `sleep(IDLE_POLL)`, which was exactly the hover
+    /// latency: the cursor could sit on the pill for a fifth of a second
+    /// before the app looked at `pointer_over` again, and the morph then
+    /// integrated that whole gap in one clamped step — a 2 px pop followed by
+    /// a slow crawl. Waiting on the input queue breaks the wait the moment a
+    /// *posted* message arrives — notably the `WM_MOUSE_WAKE` relay from the
+    /// raw-input handler (`wake_if_near_body`), which fires while the cursor
+    /// approaches or leaves the body. Queued raw input itself does not break
+    /// this wait (measured: planted moves sat out the full timeout on Win11),
+    /// which is why the relay exists. The timeout is only the fallback for
+    /// the periodic polls (power, net, disk).
+    pub fn wait_for_input(&self, timeout: std::time::Duration) {
+        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+        // SAFETY: no handles, so the wait is on this thread's input queue only;
+        // the return value is a wake reason we do not need to inspect.
+        unsafe {
+            let _ = MsgWaitForMultipleObjectsEx(None, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
     }
 
     /// Publish the live body's position/size inside the fixed frame.
@@ -882,7 +1041,15 @@ impl Overlay {
     /// desktop icons that live near the notch need. `WM_NCHITTEST` and
     /// `pointer_over` keep the same rect as a second line of defence; all
     /// three read the same `hit_body` helper so they cannot disagree.
-    pub fn set_body(&mut self, logical_w: f32, logical_h: f32, frame_w: f32, offset_y: f32) {
+    pub fn set_body(
+        &mut self,
+        logical_w: f32,
+        logical_h: f32,
+        frame_w: f32,
+        offset_y: f32,
+        settled: bool,
+    ) {
+        self.settled = settled;
         let width = self.dpi().snap(logical_w) as i32;
         self.hover_width_px = width.max(1);
         self.state.body_inset = ((self.dpi().snap(frame_w) as i32 - width) / 2).max(0);
@@ -898,14 +1065,58 @@ impl Overlay {
         let l = (self.state.body_inset - ear).max(0);
         let t = self.state.body_offset_y.max(0);
         let (r, b) = (l + self.state.body_width + 2 * ear, t + self.state.body_height);
-        if (l, t, r, b) != self.state.applied_rgn {
-            self.state.applied_rgn = (l, t, r, b);
+        // SetWindowRgn is a compositor round-trip (~30-60 ms on this box), so
+        // it must not run per morph frame: that was the transition stall, not
+        // the drawing.
+        //
+        // While any spring is live the region is the WHOLE frame. A grown-only
+        // union was not enough: the hover peek slides the body 4 px down, and
+        // re-cut the top edge upward mid-drop, so the pill's top (and its
+        // shadow) were clipped for the length of the morph — the "hovering
+        // sometimes cuts the notch off". The full frame can never clip, and it
+        // costs nothing in click-through: `WM_NCHITTEST` still answers
+        // `HTTRANSPARENT` everywhere outside `hit_body`, and `pointer_over`
+        // bounds hover to the same rect.
+        //
+        // At rest the region is the exact body (plus the ear wings the outline
+        // draws outside it), which is what keeps the transparent margins from
+        // eating desktop clicks at all.
+        // At rest the region is the body plus a small pad: the island draws a
+        // soft shadow past its own rect, and an exact-cut region shaved that
+        // off — the "top/bottom of the notch looks clipped" report. The pad
+        // stays click-through anyway (`hit_body` is unchanged), it only
+        // unclips ink.
+        let pad = self.dpi().snap(8.0) as i32;
+        let (fw, fh) = self.frame_px();
+        let rgn = if settled {
+            (
+                (l - pad).max(0),
+                (t - pad).max(0),
+                (r + pad).min(fw),
+                (b + pad).min(fh),
+            )
+        } else {
+            (0, 0, fw, fh)
+        };
+        if rgn != self.state.applied_rgn {
+            self.state.applied_rgn = rgn;
             // SAFETY: CreateRectRgn returns an owned HRGN; SetWindowRgn takes
             // ownership on success *and* failure (MSDN), so there is no leak
             // and no double free. The region is in window coordinates.
-            let hrgn = unsafe { CreateRectRgn(l, t, r, b) };
+            let hrgn = unsafe { CreateRectRgn(rgn.0, rgn.1, rgn.2, rgn.3) };
             unsafe { SetWindowRgn(self.hwnd, Some(hrgn), true) };
         }
+    }
+
+    /// The fixed frame size in physical px (client == window: WS_POPUP).
+    fn frame_px(&self) -> (i32, i32) {
+        let mut r = RECT::default();
+        // SAFETY: our own HWND; a failure leaves the rect zeroed, which the
+        // caller treats as a degenerate region it will retry next frame.
+        unsafe {
+            let _ = GetWindowRect(self.hwnd, &mut r);
+        }
+        ((r.right - r.left).max(1), (r.bottom - r.top).max(1))
     }
 
     /// Window rect in physical screen pixels (not DPI-virtualized).

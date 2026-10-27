@@ -105,10 +105,14 @@ impl IslandState {
     }
 
     /// True when the island is currently expanded because playback started.
+    #[allow(dead_code)]
     pub fn auto_expanded(&self) -> bool {
         self.auto_expanded
     }
 
+    /// Auto-expand when a track starts playing. Unused now that playback no
+    /// longer opens the island; kept for tests that pin the policy.
+    #[allow(dead_code)]
     /// Auto-expand when a track starts playing. No-op if already expanded or
     /// currently hidden by a fullscreen policy. Returns whether the mode changed.
     pub fn open_for_playback(&mut self) -> bool {
@@ -121,6 +125,7 @@ impl IslandState {
         true
     }
 
+    #[allow(dead_code)]
     /// Collapse again once playback stops, but only if WE opened it. Returns
     /// whether the mode changed.
     pub fn close_after_playback(&mut self) -> bool {
@@ -190,28 +195,35 @@ impl IslandState {
             // settles back, which is what makes the island read as alive instead
             // of as a box that changed size.
             WindowMode::Expanded => {
-                self.width.set_config(SpringConfig::new(0.34, 0.8));
-                self.height.set_config(SpringConfig::new(0.40, 0.62));
-                self.radius.set_config(SpringConfig::new(0.46, 0.7));
-                self.drop.set_config(SpringConfig::new(0.30, 0.7));
+                self.width.set_config(SpringConfig::new(0.34, 1.0));
+                self.height.set_config(SpringConfig::new(0.36, 1.0));
+                self.radius.set_config(SpringConfig::new(0.40, 1.0));
+                self.drop.set_config(SpringConfig::new(0.30, 1.0));
             }
             // Hover: a short bob. The drop is the only spring that moves, so
             // its overshoot is what the pill's bounce is made of; peek_t clamps
             // at 1 while the body keeps dipping, so the shape stays a capsule
             // through the whole bounce.
             WindowMode::Peek => {
-                self.width.set_config(SpringConfig::new(0.26, 0.88));
-                self.height.set_config(SpringConfig::new(0.28, 0.82));
-                self.radius.set_config(SpringConfig::new(0.30, 0.72));
-                self.drop.set_config(SpringConfig::new(0.36, 0.52));
+                // No bounce: the hover drop is one monotonic glide from the
+                // notch down into the floating pill. The reference's hover
+                // reads as the body detaching and the top corners rounding
+                // off, never as a spring ringing past its rest spot.
+                self.width.set_config(SpringConfig::new(0.26, 1.0));
+                self.height.set_config(SpringConfig::new(0.30, 1.0));
+                self.radius.set_config(SpringConfig::new(0.30, 1.0));
+                self.drop.set_config(SpringConfig::new(0.34, 1.0));
             }
-            // Collapse into the smaller state including a peek release: fast
-            // and critically damped, no overshoot, ~2/3 of the expand time.
+            // Collapse into the smaller state including a peek release:
+            // critically damped, so the body glides straight back into the pill
+            // with no ring. The height is the slower axis on purpose: the panel
+            // reads as coming down into the pill instead of snapping shut,
+            // which is what the reference's ~500 ms collapse looks like.
             _ => {
-                self.width.set_config(SpringConfig::new(0.20, 1.0));
-                self.height.set_config(SpringConfig::new(0.13, 1.0));
-                self.radius.set_config(SpringConfig::new(0.22, 1.0));
-                self.drop.set_config(SpringConfig::new(0.15, 1.0));
+                self.width.set_config(SpringConfig::new(0.26, 1.0));
+                self.height.set_config(SpringConfig::new(0.32, 1.0));
+                self.radius.set_config(SpringConfig::new(0.28, 1.0));
+                self.drop.set_config(SpringConfig::new(0.22, 1.0));
             }
         }
         self.width.set_target(w);
@@ -225,7 +237,7 @@ impl IslandState {
         // velocity rings exactly that way, so kick it instead of hand-rolling
         // a second animation. Only on the way UP: the reference collapse is
         // straight, with no pop.
-        if matches!(self.mode, WindowMode::Peek | WindowMode::Expanded) {
+        if matches!(self.mode, WindowMode::Expanded) {
             self.pop.set_config(SpringConfig::POP);
             self.pop.set_velocity(POP_VELOCITY);
         }
@@ -375,6 +387,16 @@ impl IslandState {
 
     /// Advance springs by real elapsed time. Used by the frame loop so a dropped
     /// frame shortens the animation instead of slowing it down.
+    /// Whether any morph spring is still moving — a read-only peek for code
+    /// that must not stall a live morph (the net/WLAN poll costs ~80 ms).
+    pub fn busy(&self) -> bool {
+        self.width.is_animating()
+            || self.height.is_animating()
+            || self.radius.is_animating()
+            || self.drop.is_animating()
+            || self.pop.is_animating()
+    }
+
     pub fn step_dt(&mut self, dt: f32) -> bool {
         let a = self.width.step(dt);
         let b = self.height.step(dt);
@@ -388,6 +410,7 @@ impl IslandState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn starts_collapsed_at_pill_geometry() {
@@ -702,13 +725,12 @@ mod tests {
         );
     }
 
-    /// The pop has to reach the pill, not just the spring.
-    ///
-    /// Regression: `POP_VELOCITY` sat below the settle threshold, so hovering
-    /// produced a dead-straight morph with no bounce at all. The reference
-    /// (vnotch-dynamic.gif f117) inflates the pill ~11% and dips it ~4%.
+    /// The hover glide must be monotonic: no inflation past the pill's rest
+    /// width, no squash below it. The reference's hover drop reads as the
+    /// body detaching and the top corners rounding off, never as a spring
+    /// ringing past its rest spot. It still settles on the exact 185 width.
     #[test]
-    fn hovering_bounces_the_pill_past_its_rest_width() {
+    fn hovering_never_bounces_the_pill_past_its_rest_width() {
         let mut s = IslandState::collapsed();
         assert!(s.hover_step(true), "cursor over the pill must peek it");
         let (mut peak, mut trough) = (s.logical_width(), s.logical_width());
@@ -721,12 +743,12 @@ mod tests {
         let ratio_peak = peak / crate::ui::layout::PEEK_W_REF;
         let ratio_trough = trough / crate::ui::layout::PEEK_W_REF;
         assert!(
-            (ratio_peak - 1.112).abs() < 0.02,
-            "hover must inflate ~11%: peak {ratio_peak}"
+            ratio_peak <= 1.0 + 1e-3,
+            "hover must not overshoot: peak {ratio_peak}"
         );
         assert!(
-            (ratio_trough - 0.963).abs() < 0.02,
-            "and squash ~4%: trough {ratio_trough}"
+            ratio_trough >= 1.0 - 1e-3,
+            "hover must not squash: trough {ratio_trough}"
         );
         assert!(
             (s.logical_width() - crate::ui::layout::PEEK_W_REF).abs() < 0.06,

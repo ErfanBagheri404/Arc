@@ -242,44 +242,52 @@ pub fn notch_metrics(rect: &Rect, radii: CornerRadii) -> (f32, f32, f32, f32, f3
     (body_left, body_right, bl, br, wl, wr)
 }
 
-/// The notch outline: clockwise from the frame's top-right corner —
-/// TR wing down to the body's right side, bottom-right, bottom, bottom-left,
-/// up the body's left side, TL wing back to the frame's top-left corner.
+/// The notch outline: clockwise from top-left (TL wing, BL, BR, TR wing).
+/// Same segment order as `squircle_segments` so the figure never reorders.
 /// The implicit lines between segments are the body's sides and the top edge
-/// along the screen. Same chaining contract as `squircle_segments`.
+/// along the screen.
 #[allow(clippy::vec_init_then_push)]
 fn notch_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     let (body_l, body_r, bl, br, wl, wr) = notch_metrics(rect, radii);
     let (y, max_y) = (rect.y, rect.max_y());
-    let c = SQUIRCLE_C;
+    // Same lerp as `squircle_segments`, so an ear outline and a fillet outline
+    // with the same bottom radius agree — otherwise the swap at `top_r == 0`
+    // would jump the bottom corners too.
+    let cap = (rect.w.min(rect.h) / 2.0).max(0.0);
+    let corner_c = |corner: f32| {
+        let t = (((corner / cap) - 0.8) / 0.2).max(0.0).min(1.0);
+        SQUIRCLE_C + t * (0.5523 - SQUIRCLE_C)
+    };
     let mut segs = Vec::with_capacity(4);
 
-    // TR wing: outer top (rect.max_x() + wr, y) → body right side (rect.max_x(), y + wr).
-    // Flares OUTWARD into the transparent frame margin, so the body keeps its
-    // full width and the ears are decoration beside it, not carved out of it.
+    // TL wing: frame's top-left margin (rect.x - wl, y) → body left side
+    // (rect.x, y + wl). Flares OUTWARD into the transparent frame margin, so
+    // the body keeps its full width and the ears are decoration beside it.
     segs.push(PathSegment {
-        c1: (rect.max_x() + wr * 1.0 / 3.0, y),
-        c2: (rect.max_x(), y + wr / 3.0),
-        to: (rect.max_x(), y + wr),
+        c1: (rect.x - wl * 2.0 / 3.0, y),
+        c2: (rect.x, y + wl / 3.0),
+        to: (rect.x, y + wl),
     });
-    // Bottom-right on the body's own extent.
+    // Bottom-left on the body's own extent: (body_l, max_y - bl) → (body_l + bl, max_y).
+    let c = corner_c(bl);
     segs.push(PathSegment {
-        c1: (body_r, max_y - br * (1.0 - c)),
-        c2: (body_r - br * (1.0 - c), max_y),
-        to: (body_r - br, max_y),
+        c1: (body_l, max_y - bl * (1.0 - c)),
+        c2: (body_l + bl * (1.0 - c), max_y),
+        to: (body_l + bl, max_y),
     });
-    // Bottom-left on the body's own extent.
+    // Bottom-right on the body's own extent: (body_r - br, max_y) → (body_r, max_y - br).
+    let c = corner_c(br);
     segs.push(PathSegment {
-        c1: (body_l + bl * (1.0 - c), max_y),
-        c2: (body_l, max_y - bl * (1.0 - c)),
-        to: (body_l, max_y - bl),
+        c1: (body_r - br * (1.0 - c), max_y),
+        c2: (body_r, max_y - br * (1.0 - c)),
+        to: (body_r, max_y - br),
     });
-    // TL wing: body left side (rect.x, y + wl) → outer top (rect.x - wl, y),
-    // mirroring the TR wing. Flares OUTWARD into the transparent margin.
+    // TR wing: body right side (rect.max_x(), y + wr) → outer top
+    // (rect.max_x() + wr, y), mirroring the TL wing above.
     segs.push(PathSegment {
-        c1: (rect.x, y + wl / 3.0),
-        c2: (rect.x - wl * 1.0 / 3.0, y),
-        to: (rect.x - wl, y),
+        c1: (rect.max_x(), y + wr / 3.0),
+        c2: (rect.max_x() + wr * 2.0 / 3.0, y),
+        to: (rect.max_x() + wr, y),
     });
 
     segs
@@ -302,12 +310,14 @@ pub fn squircle_segments(rect: &Rect, radii: CornerRadii) -> Vec<PathSegment> {
     // control offsets at k·r = (4/3)·tan(22.5°)·r, the exact quarter-circle arc).
     // Partially rounded corners keep the squircle look.
     let cap = (rect.w.min(rect.h) / 2.0).max(0.0);
+    // Lerped, not switched: an if/else here made the corner jump between two
+    // different curves when the radius crossed `cap - 0.5`, which read as a
+    // discrete step in the morph. Ordinary radii stay on the squircle constant
+    // and only the last fifth of the approach to a full cap eases to the circle
+    // constant, so the transition is invisible.
     let corner_c = |corner: f32| {
-        if corner >= cap - 0.5 {
-            0.5523
-        } else {
-            SQUIRCLE_C
-        }
+        let t = (((corner / cap) - 0.8) / 0.2).max(0.0).min(1.0);
+        SQUIRCLE_C + t * (0.5523 - SQUIRCLE_C)
     };
 
     // Four pushes with an exact matching capacity, each with its own comment
@@ -399,23 +409,26 @@ mod tests {
         };
         let segs = squircle_segments(&rect, radii);
         assert_eq!(segs.len(), 4);
-        // Order: TR wing, BR, BL, TL wing.
+        // Order: TL wing, BL, BR, TR wing. Each wing runs FROM the margin tip
+        // TO the body's side — the silhouette is one closed figure.
         assert_eq!(
             segs[0].to,
-            (rect.max_x(), 20.0),
-            "TR wing lands on the body's own right side"
+            (rect.x, 20.0),
+            "TL wing lands on the body's own left side"
         );
         assert_eq!(
             segs[3].to,
-            (-20.0, 0.0),
-            "TL wing ends in the margin, mirrored past the frame's left edge"
+            (rect.max_x() + 20.0, 0.0),
+            "TR wing ends in the margin, mirrored past the frame's right edge"
         );
-        // Tangent horizontal in the margin, vertical down the body's side.
-        assert_eq!(segs[0].c1.1, rect.y);
-        assert_eq!(segs[0].c2.0, rect.max_x());
-        // Bottom corners ride the FULL frame: the body is not inset anymore.
-        assert_eq!(segs[1].to, (rect.max_x() - 8.0, 40.0));
-        assert_eq!(segs[2].to, (0.0, 32.0));
+        // TL starts in the margin; tangent horizontal in the margin,
+        // vertical down the body's side.
+        assert_eq!(segs[0].c1.0, rect.x - 20.0 * 2.0 / 3.0);
+        assert_eq!(segs[0].c2.1, rect.y + 20.0 / 3.0);
+        // Bottom corners hug the body's extent as reported by `notch_metrics`
+        // (the frame's outermost x, y + the height down to the bottom edge).
+        assert_eq!(segs[1].to, (8.0, rect.max_y()));
+        assert_eq!(segs[2].to, (rect.max_x(), rect.max_y() - 8.0));
     }
 
     #[test]
@@ -472,6 +485,45 @@ mod tests {
                 s.to
             );
         }
+    }
+
+    /// The outline must not jump when `top_r` crosses zero — the ear path and
+    /// the fillet path must keep one stable segment order and identical bottom
+    /// geometry. A reorder mid-morph is a visible step.
+    #[test]
+    fn top_corner_swap_has_no_jump() {
+        let rect = Rect::new(0.0, 0.0, 185.0, 32.0);
+        let mk = |tl: f32, tr: f32| CornerRadii {
+            top_left: tl,
+            top_right: tr,
+            bottom_left: 8.0,
+            bottom_right: 8.0,
+        };
+        let below = squircle_segments(&rect, mk(-0.001, -0.001));
+        let above = squircle_segments(&rect, mk(0.001, 0.001));
+        assert_eq!(below.len(), 4);
+        assert_eq!(above.len(), 4);
+        // Same order TL, BL, BR, TR on both sides of the sign flip, so
+        // `corner_start` never has to reorder the figure mid-morph. Both TL wing
+        // (ear, negative radius) and the fillet land on the body's left side
+        // as `top_r` → 0, and both TR wing and fillet start from the body's
+        // right side — one stable figure across the swap.
+        let body_tl = (rect.x, rect.y);
+        let body_tr = (rect.max_x(), rect.y);
+        for p in [below[0].to, above[0].to] {
+            let d = ((p.0 - body_tl.0).powi(2) + (p.1 - body_tl.1).powi(2)).sqrt();
+            assert!(d < 0.01, "TL does not converge to the body's corner: {p:?}");
+        }
+        for p in [
+            (below[3].c1.0, below[3].c1.1),
+            (above[3].c1.0, above[3].c1.1),
+        ] {
+            let d = ((p.0 - body_tr.0).powi(2) + (p.1 - body_tr.1).powi(2)).sqrt();
+            assert!(d < 0.01, "TR does not start at the body's corner: {p:?}");
+        }
+        // Bottoms identical (they carry no sign).
+        assert_eq!(below[1].to, above[1].to);
+        assert_eq!(below[2].to, above[2].to);
     }
 
     #[test]

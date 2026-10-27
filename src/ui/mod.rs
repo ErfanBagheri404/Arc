@@ -42,18 +42,18 @@ pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
 ///
-/// Nine, not ten: the Settings tab is gone. Settings live in their own
-/// top-level window (tray → Settings…), so the strip never spends its width on
-/// a tab the user does not browse. Dropping it also hands the remaining labels
-/// ~10% more width, which is what stops them reading as crammed.
-pub const TABS: [&str; 9] = [
+/// Eight, not nine: the Settings tab is gone (Settings live in their own
+/// top-level window, tray → Settings…), and Timer + Calendar are merged into
+/// one tab that splits its body in two — so the strip never spends width on a
+/// tab the user does not browse, and the two time widgets get side-by-side
+/// columns instead of two stops in the dock.
+pub const TABS: [&str; 8] = [
     "Media",
     "Stats",
-    "Timer",
+    "Time",
     "Clipboard",
     "Color",
     "Usage",
-    "Calendar",
     "Shelf",
     "Terminal",
 ];
@@ -95,14 +95,13 @@ pub const TAB_ICON: f32 = 17.0;
 pub const TAB_ICON_GAP: f32 = 5.0;
 
 /// One icon name per entry in [`TABS`], in the same order.
-pub const TAB_GLYPHS: [&str; 9] = [
+pub const TAB_GLYPHS: [&str; 8] = [
     "note",      // Media
     "chart",     // Stats
-    "hourglass", // Timer
+    "hourglass", // Time (timer + calendar)
     "clipboard", // Clipboard
     "drop",      // Color
     "bolt",      // Usage
-    "calendar",  // Calendar
     "tray",      // Shelf
     "terminal",  // Terminal
 ];
@@ -503,15 +502,19 @@ impl ViewState {
 
     /// Which calendar control panel-space `(x, y)` hits: `0` is the add row,
     /// `Some(i + 1)` is subscription `i`.
+    ///
+    /// The calendar shares the Time tab with the timer, in the right column, so
+    /// the click is first mapped back into that column's own space — the same
+    /// shift the draw applies, mirrored.
     pub fn calendar_hit(&self, x: f32, y: f32) -> Option<usize> {
-        if self.active_tab != CALENDAR_TAB || !self.content_visible() {
+        if self.active_tab != TIMER_TAB || !self.content_visible() {
             return None;
         }
         calendar::head_hit(
-            self.island_width,
+            time_frame(self.island_width),
             row_band_top(),
             self.cal.subs.len().min(calendar::MAX_SUBS),
-            x,
+            x - time_col_x(self.island_width),
             y,
         )
     }
@@ -612,11 +615,16 @@ pub fn build(state: &ViewState) -> Frame {
     let open = openness(fw, fh);
     let radius = island_radius(open);
     let peek_t = state.peek_t.clamp(0.0, 1.0);
-    // Collapsed: concave ear wings at the top corners (negative radius).
-    // Hover (peek): the ears are removed and the top corners round, giving a
-    // floating pill detached from the screen top.
-    let top_r = (-layout::EAR_W) * (1.0 - peek_t) + (fh / 2.0) * peek_t;
-    let bottom_r = radius * (1.0 - peek_t) + (fh / 2.0) * peek_t;
+    // Collapsed AND expanded: concave ear wings at the top corners (negative
+    // radius) — that silhouette is what reads as "attached to the notch", in
+    // both the minimized pill and the open panel. Hover (peek) is the only
+    // state that retracts them, taking the body radius for a floating capsule.
+    //
+    // The top corner lerps ear -> `radius`, NOT ear -> fh/2: on a 310 px panel
+    // fh/2 is a 155 px bulge on the top corners against a 36 px bottom, which
+    // is what made the four corners buckle through the hover morph.
+    let top_r = (-layout::EAR_W) * (1.0 - peek_t) + radius * peek_t;
+    let bottom_r = radius;
 
     let mut scene = Scene::new();
 
@@ -653,7 +661,21 @@ pub fn build(state: &ViewState) -> Frame {
     //    hovering changes the shape, never the size.
     //    Content: the reference's collapsed shape — title + thin VU bars on the
     //    right, no art, no progress.
-    if state.peek {
+    //
+    //    The gate is `peek_t`, not `state.peek`: the mode flag flips the instant
+    //    the cursor leaves, but the springs that reshape the body keep running
+    //    for another ~150 ms. Gating on the flag made the shape morph back while
+    //    the content popped out in a single frame — the missing fade. `peek_t` IS
+    //    that spring's progress, so the content dissolves on the same curve the
+    //    silhouette does.
+    //
+    //    This branch must NOT return. Returning was the "notch won't open" bug:
+    //    a click while hovering sets mode=Expanded while the drop spring still
+    //    carries peek_t > 0, so the branch swallowed the frame and the panel
+    //    content never got drawn. Falling through lets the panel fade in over the
+    //    peek surface instead of replacing it, and the glyph below is weighted by
+    //    `peek_out` so the two centred marks never stack.
+    if peek_t > 0.0 {
         let opacity = peek_t;
         if opacity > 0.0 {
             // A live HUD takes the glyph's slot.
@@ -727,15 +749,16 @@ pub fn build(state: &ViewState) -> Frame {
                 }
             }
         }
-        return Frame {
-            size: (fw, fh),
-            scene,
-        };
     }
 
     // 3. Collapsed pill glyph. Fades out across the first half of the morph, so it
-    //    dissolves instead of vanishing under the arriving panel content.
-    let glyph_opacity = 1.0 - layout::ease(open / layout::PILL_GLYPH_FADE_OUT_END);
+    //    dissolves instead of vanishing under the arriving panel content. Weighted
+    //    by `peek_out`: the peek surface owns the centred slot whenever it is up.
+    let peek_out = 1.0 - peek_t;
+    let glyph_opacity = (1.0 - layout::ease(open / layout::PILL_GLYPH_FADE_OUT_END)) * peek_out;
+    // A zero-alpha squircle still costs a tessellation, and an alpha-0 glyph in
+    // the scene is how the "notch won't open" regression looked: a fully open
+    // panel with an invisible overlay hiding it. Drop the node instead.
     if glyph_opacity > 0.0 {
         // A live HUD takes the glyph's slot: showing both would stack two
         // centred marks in a pill that only fits one.
@@ -1027,17 +1050,33 @@ fn panel_body(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Node> {
     } else if tab == STATS_TAB {
         stats::content(fw, fh, tab_bottom, &state.stats, &state.procs)
     } else if tab == TIMER_TAB {
-        timer::content(fw, fh, tab_bottom, &state.timer)
+        // One tab, two columns: the timer keeps the left half, the calendar's
+        // subscriptions and events take the right. Both builders are pure and
+        // read `PANEL_PAD` off the frame they are handed, so each gets a frame
+        // one padding wider than its column and the right one is shifted by the
+        // column pitch — its padding then lands on the column's own edge.
+        let cw = time_frame(fw);
+        let mut out = timer::content(cw, fh, tab_bottom, &state.timer);
+        let mut cal = calendar::content(cw, fh, tab_bottom, &state.cal);
+        for n in &mut cal {
+            n.translate(time_col_x(fw), 0.0);
+        }
+        out.append(&mut cal);
+        out
     } else if tab == CLIPBOARD_TAB {
         clipboard::content(fw, fh, tab_bottom, &state.clip_entries, state.clip_enabled)
     } else if tab == PICKER_TAB {
         picker::content(fw, fh, tab_bottom, &state.picker)
-    } else if tab == CALENDAR_TAB {
-        calendar::content(fw, fh, tab_bottom, &state.cal)
     } else if tab == SHELF_TAB {
         shelf::content(fw, fh, tab_bottom, &state.shelf)
     } else if tab == USAGE_TAB {
-        usage::content(fw, fh, tab_bottom, &state.usage)
+        usage::content(
+            fw,
+            fh,
+            tab_bottom,
+            &state.usage,
+            crate::services::usage::now_secs() as i64,
+        )
     } else if tab == TERMINAL_TAB {
         // Settings now live in their own window (tray → Settings…), so the
         // expanded notch no longer hosts a Settings tab.
@@ -1056,19 +1095,36 @@ fn panel_body(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Node> {
 /// Index in [`TABS`] of the Media tab — the one with a real content surface.
 pub const MEDIA_TAB: usize = 0;
 pub const STATS_TAB: usize = 1;
-/// The Timer tab — real content behind it now.
+/// The Time tab — one tab, two columns: timer left, calendar right.
 pub const TIMER_TAB: usize = 2;
 /// The Clipboard tab — history, consent row, clear-all.
 pub const CLIPBOARD_TAB: usize = 3;
 pub const PICKER_TAB: usize = 4;
-/// The Calendar tab — upcoming events from subscribed `.ics` sources.
-pub const CALENDAR_TAB: usize = 6;
 /// The Shelf tab — pinned files dropped on the island.
-pub const SHELF_TAB: usize = 7;
+pub const SHELF_TAB: usize = 6;
 /// The Usage tab — still the generic placeholder rows.
 pub const USAGE_TAB: usize = 5;
 /// The Terminal tab — the ConPTY grid.
-pub const TERMINAL_TAB: usize = 8;
+pub const TERMINAL_TAB: usize = 7;
+
+/// The Time tab's column width: the panel's content width minus one gutter,
+/// split in two.
+fn time_col(fw: f32) -> f32 {
+    ((fw - PANEL_PAD * 2.0 - ROW_GAP) / 2.0).max(0.0)
+}
+
+/// The frame handed to each half. Both bodies were built against the whole
+/// panel and carry its `PANEL_PAD`, so they get a frame one padding wider than
+/// their column and are shifted by `time_col_x()` — the padding they add then
+/// lands exactly on the column's own edges.
+fn time_frame(fw: f32) -> f32 {
+    time_col(fw) + PANEL_PAD * 2.0
+}
+
+/// Where the right (calendar) column's content starts, in panel space.
+fn time_col_x(fw: f32) -> f32 {
+    time_col(fw) + ROW_GAP
+}
 
 /// Height of the header row's line box (20 px title × 1.3 line height).
 fn header_height() -> f32 {
@@ -1779,21 +1835,18 @@ mod tests {
     /// across the top. Anything wider reads as a different, larger widget.
     #[test]
     fn peek_width_is_the_minimized_body_width_not_the_arced_silhouette() {
+        // The hover pill takes the collapsed body width with no ear wings to
+        // exclude: the reference is a plain rounded rectangle at every stage.
         let f = collapsed();
         let Node::RoundRect { rect, radii, .. } = &f.scene.nodes[0] else {
             panic!("first node is the body")
         };
         assert_eq!(rect.w, layout::PILL_W_REF, "collapsed body spans the frame");
         assert!(radii.top_left < 0.0, "collapsed top corners are concave ears");
-
         assert_eq!(
             layout::PEEK_W_REF,
             rect.w,
-            "hover width must equal the collapsed BODY width (arcs excluded)"
-        );
-        assert!(
-            layout::PEEK_W_REF < rect.w + 2.0 * layout::EAR_W,
-            "hover must not grow to the arced silhouette width"
+            "hover width must equal the collapsed body width"
         );
     }
 
@@ -2283,18 +2336,25 @@ mod tests {
 
     #[test]
     fn expanded_body_keeps_its_corners_rounded_too() {
-        // The panel morph: top corners stay at the constant wing notch, bottom
-        // corners grow from pill 16 -> panel 36.
+        // The panel morph: top corners take the body radius once the ears
+        // retract (open>0), bottoms grow 16 -> 36. The old fh/2 bulge is gone.
         for open in [0.0f32, 0.5, 1.0] {
             let f = build(&view_sized(width_at(open), height_at(open)));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
-            let h = height_at(open);
-            let notch = layout::EAR_W.min(h / 2.0);
-            assert_eq!(radii.top_left, -notch, "wing notch at {open}");
-            assert_eq!(radii.top_right, -notch, "wing notch at {open}");
             let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
+            let (w, h) = (width_at(open), height_at(open));
+            let top_want = -(layout::EAR_W.min(w.min(h) / 2.0));
+            assert!(
+                (radii.top_left - top_want).abs() < 1e-3,
+                "top_left at {open}: {top_want} != {:?}",
+                radii
+            );
+            assert_eq!(
+                radii.top_right, radii.top_left,
+                "top corners mirror at {open}"
+            );
             assert!(
                 (radii.bottom_left - want).abs() < 1e-3,
                 "bottom_left at {open}"
@@ -2662,6 +2722,70 @@ mod tests {
         );
     }
 
+    /// The "notch won't open" regression: a click while hovering switches the mode
+    /// to Expanded immediately, but the drop spring is still carrying `peek_t`
+    /// down from 1.0. The peek branch used to `return` from there, so every
+    /// frame during that overlap drew the hover surface and nothing else — the
+    /// panel content never appeared and the island looked stuck.
+    #[test]
+    fn panel_content_survives_a_decaying_peek_during_the_open() {
+        for i in 0..=10 {
+            let peek_t = i as f32 / 10.0;
+            let mut v = view_sized(PANEL_W_REF, PANEL_H_REF);
+            v.peek = false; // mode already flipped
+            v.peek_t = peek_t;
+            let f = build(&v);
+            assert!(
+                f.scene.count() > 2,
+                "panel content must be drawn while peek_t decays ({peek_t}): {:#?}",
+                f.scene.nodes
+            );
+            assert!(
+                find_text(&f, APP_TITLE).is_some(),
+                "the title must be present while peek_t decays ({peek_t})"
+            );
+        }
+    }
+
+    /// The companion of the test above: on hover-out the mode flag drops first,
+    /// so the hover surface must ride `peek_t` down frame by frame instead of
+    /// disappearing in one — that single-frame hole is the missing fade.
+    #[test]
+    fn peek_surface_fades_out_on_the_spring_after_the_mode_drops() {
+        let mut alphas = Vec::new();
+        for i in 0..=10 {
+            let peek_t = 1.0 - i as f32 / 10.0;
+            let mut v = view_sized(layout::PEEK_W_REF, layout::PEEK_H_REF);
+            v.peek = false; // cursor already left
+            v.peek_t = peek_t;
+            v.media.playing = true;
+            v.media.title = "Reference".to_string();
+            let f = build(&v);
+            // The hover surface's title text is what owns the centre slot. It is
+            // distinguishable from the collapsed pill's own media title: the
+            // hover surface is set at 12.5, the pill's at 10.5.
+            let alpha = texts(&f)
+                .into_iter()
+                .find(|(t, _, s)| t == "Reference" && (s.size - 12.5).abs() < 1e-3)
+                .map(|(_, _, s)| s.color.a)
+                .unwrap_or(0.0);
+            alphas.push((peek_t, alpha));
+        }
+        let rising = alphas.windows(2).all(|w| w[0].1 >= w[1].1 - 1e-6);
+        assert!(rising, "title alpha must fall as peek_t falls: {alphas:?}");
+        assert!(
+            alphas[0].1 > 0.9 && alphas.last().unwrap().1 < 0.05,
+            "hover surface must go from full to gone: {alphas:?}"
+        );
+        // Mid-fade both surfaces exist: that overlap IS the crossfade.
+        let mut mid = view_sized(layout::PEEK_W_REF, layout::PEEK_H_REF);
+        mid.peek = false;
+        mid.peek_t = 0.5;
+        mid.media.playing = true;
+        mid.media.title = "Reference".to_string();
+        assert!(build(&mid).scene.count() >= 2, "both surfaces at mid-fade");
+    }
+
     #[test]
     fn content_is_skipped_below_the_fade_in_threshold() {
         let at = layout::CONTENT_FADE_IN_START - 0.01;
@@ -2740,28 +2864,35 @@ mod tests {
 
     #[test]
     fn radius_lerps_16_to_36_across_the_morph() {
-        // Top corners are the constant wing notch; bottom corners track
-        // openness 16 -> 36 monotonically.
+        // Bottom corners ease 16 -> 36 with openness. The top corners are the
+        // concave ear at every openness while not hovering: the panel is as
+        // notched as the pill.
         let mut prev = -1.0;
         for i in 0..=100 {
             let open = i as f32 / 100.0;
-            let f = build(&view_sized(width_at(open), PANEL_H_REF));
+            let (w, h) = (width_at(open), height_at(open));
+            let f = build(&view_sized(w, h));
             let Node::RoundRect { radii, .. } = &f.scene.nodes[0] else {
                 panic!()
             };
             let want = PILL_RADIUS_REF + (PANEL_RADIUS_REF - PILL_RADIUS_REF) * open;
-            assert_eq!(radii.top_left, -layout::EAR_W, "wing notch at {open}");
-            assert_eq!(radii.top_right, -layout::EAR_W, "wing notch at {open}");
+            let top_want = -(layout::EAR_W.min(w.min(h) / 2.0));
             assert!(
                 (radii.bottom_left - want).abs() < 1e-3,
-                "at {open}: {:?}",
+                "bottom_left at {open}: {want} != {:?}",
                 radii
             );
             assert!(
                 (radii.bottom_right - want).abs() < 1e-3,
-                "at {open}: {:?}",
+                "bottom_right at {open}: {want} != {:?}",
                 radii
             );
+            assert!(
+                (radii.top_left - top_want).abs() < 1e-3,
+                "top_left at {open}: {top_want} != {:?}",
+                radii
+            );
+            assert_eq!(radii.top_right, radii.top_left, "mirrored at {open}");
             assert!(radii.bottom_left >= prev, "radius dipped at {open}");
             prev = radii.bottom_left;
         }
@@ -3147,5 +3278,54 @@ mod tests {
         // A settled swap must be a no-op on the scene.
         let after = build(&state);
         assert_eq!(before.scene.nodes.len(), after.scene.nodes.len());
+    }
+
+    // ------------------------------------------------------- merged Time tab
+
+    /// One tab, two columns: the timer's presets and the calendar's add row
+    /// must both be on the Time tab, and the calendar must sit in the right
+    /// half — the whole point of the merge.
+    #[test]
+    fn time_tab_draws_the_timer_left_and_the_calendar_right() {
+        let f = build(&view(TIMER_TAB, None));
+        let preset = texts(&f)
+            .into_iter()
+            .find(|(t, _, _)| t == "1m" || t == "1 min")
+            .expect("first preset");
+        let add = find_text(&f, "+ Add calendar — copy an .ics URL first").expect("add row");
+        let mid = time_col(PANEL_W_REF) + PANEL_PAD + ROW_GAP / 2.0;
+        assert!(
+            preset.1.max_x() <= mid,
+            "timer must stay in the left column: {:?} vs {mid}",
+            preset.1
+        );
+        assert!(add.0.x >= mid, "calendar must sit right of the gutter: {:?}", add.0);
+        // Both inside the panel's own padding.
+        for r in [preset.1, add.0] {
+            assert!(r.max_x() <= PANEL_W_REF - PANEL_PAD + 0.01, "{r:?}");
+        }
+    }
+
+    /// Drawing and hit-testing must agree after the shift: the add row's drawn
+    /// rect is where the click lands, and the timer's own buttons still hit on
+    /// the left.
+    #[test]
+    fn time_tab_hits_the_column_the_control_is_drawn_in() {
+        let v = view(TIMER_TAB, None);
+        let add = {
+            let f = build(&v);
+            find_text(&f, "+ Add calendar — copy an .ics URL first")
+                .expect("add row")
+                .0
+        };
+        assert_eq!(
+            v.calendar_hit(add.center().0, add.center().1),
+            Some(0),
+            "the add row's own centre must hit it"
+        );
+        // The left column is the timer's: a calendar control cannot be hit there.
+        assert_eq!(v.calendar_hit(PANEL_PAD + 4.0, add.center().1), None);
+        let b = timer::buttons(time_frame(PANEL_W_REF), row_band_top())[0];
+        assert_eq!(v.timer_preset(b.center().0, b.center().1), Some(0));
     }
 }

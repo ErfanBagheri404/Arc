@@ -214,9 +214,6 @@ impl Countdown {
     }
 }
 
-/// Nominal frame budget. Springs integrate against real elapsed time, so a slower
-/// display changes smoothness, not the motion curve.
-const NOMINAL_FRAME: Duration = Duration::from_micros(16_667);
 /// When fully idle, yield this long between message-queue polls instead of spinning.
 /// Also the hover-polling cadence: a collapsed island is click-through, so the
 /// pointer has to be sampled rather than awaited. 25 ms is under one frame at
@@ -236,6 +233,16 @@ const DBG_REASONS: [&str; 31] = [
 static DBG_DRAW_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static DBG_BUILD_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static DBG_PRESENT_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_POLL_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_SVC_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_SLEEP_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_WANT_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_AT_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_PARK_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_EV_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_POLLS_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_PRE_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DBG_POST_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub fn dbg_reason(i: usize) {
     DBG_REASON.fetch_or(1 << i, std::sync::atomic::Ordering::Relaxed);
@@ -279,6 +286,8 @@ const POWER_POLL: Duration = Duration::from_millis(500);
 /// Connectivity, VPN tunnel, brightness: state, not events — 2 s is plenty
 /// and keeps the GetIfTable2 walk off the hot path.
 const NET_POLL: Duration = Duration::from_secs(2);
+/// One display refresh at 60 Hz. Morph frames are paced to this.
+const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
 /// Arm a volume HUD when the master volume or mute state *changes*. Same rule as
 /// the battery: the transition is the event, holding the key just extends it.
@@ -432,6 +441,7 @@ pub fn run() -> std::process::ExitCode {
     // HUD layer + the power reading it reacts to. Owned by the run loop; the UI
     // only ever sees the current HUD through `ViewState`.
     let mut hud = hud::HudLayer::default();
+    // Deadline the next morph frame is paced to. Anchored on the first
     let mut last_power = Instant::now() - POWER_POLL;
     let mut last_net = Instant::now() - NET_POLL;
     let mut last_net_state: Option<NetState> = None;
@@ -510,11 +520,42 @@ pub fn run() -> std::process::ExitCode {
     view.pinned = state.user_vis() == crate::app::state::UserVis::Pinned;
     view.peek = state.mode() == crate::app::state::WindowMode::Peek;
     view.peek_t = (state.body_offset_y() / crate::app::state::PEEK_DROP).clamp(0.0, 1.0);
+    // Warm both ends of the morph, twice each (one pass per back buffer).
+    // DirectWrite rasterises glyph runs on the CPU inside `EndDraw` and caches
+    // them per render target, so the first frame at a size it has never drawn
+    // pays ~25 ms to build that cache — which is the hitch at the start of
+    // every expand, not a rendering cost of the morph itself. Priming the
+    // expanded and collapsed layouts here, before `show()`, moves that cost to
+    // boot and the morph then runs at a flat display rate.
     let frame = ui::build(&view);
     renderer.present(&frame, overlay.dpi().scale, 0.0, state.body_offset_x(), state.body_offset_y(), true);
 
+    // 1 ms timer resolution for the morph's frame pacing; without it every
+    // `sleep` rounds up to 15.6 ms and the morph runs at ~45 fps with jitter.
+    unsafe { windows::Win32::Media::timeBeginPeriod(1) };
+    let mut frame_clock = Instant::now();
     let mut last = Instant::now();
+    // Opened once: an open/append/close per frame cost 40-100 ms spikes that
+    // swamped the very stalls this log exists to measure.
+    let mut dbg_lines: u64 = 0;
+    let dbg_at0 = std::time::Instant::now();
+    let mut dbg_log: Option<std::io::BufWriter<std::fs::File>> =
+        if std::env::var("ARC_DBG_LOOP").is_ok() {
+            std::fs::File::create(r"C:\Users\mrenm\AppData\Local\hermes\cache\scratch\arc_dbg.log")
+                .ok()
+                .map(|f| std::io::BufWriter::with_capacity(64 << 10, f))
+        } else {
+            None
+        };
+    // Live write-through: BufWriter would hold the tail in memory when the
+    // harness terminates the process, losing the last morph — the only one
+    // that matters. A 64 KB buffer flushed per line is still one syscall.
+    if let Some(f) = dbg_log.as_mut() {
+        f.get_mut().set_len(0).ok();
+    }
     loop {
+        let dbg_loop0 = Instant::now();
+        DBG_AT_US.store(dbg_at0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
         let mut redraw = false;
         let scale = overlay.dpi().scale;
         // The persistent view must carry the current geometry: this iteration's
@@ -531,9 +572,12 @@ pub fn run() -> std::process::ExitCode {
             state.logical_height(),
             state.frame_width(),
             state.body_offset_y(),
+            !state.busy(),
         );
-
-        for event in overlay.pump_events() {
+        let dbg_e0 = Instant::now();
+        let events = overlay.pump_events();
+        DBG_EV_US.store(dbg_e0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
+        for event in events {
             match event {
                 Event::ToggleIsland => state.toggle(),
                 // Ctrl+Shift+Z: user owns visibility from here on.
@@ -704,14 +748,19 @@ pub fn run() -> std::process::ExitCode {
                         view.hover_tab = tab;
                         view.hover_row = row;
                         dbg_reason(11);
-                        redraw = true;
                     }
+                    // The pointer moving is itself the reason to re-evaluate the
+                    // peek/busy state on this frame.
+                    redraw = true;
                 }
                 Event::CursorLeft => {
                     if view.hover_tab.take().is_some() | view.hover_row.take().is_some() {
                         dbg_reason(12);
                         redraw = true;
                     }
+                    // Treat leaving like a hover poll: the pill hears about it
+                    // on this frame instead of at the next idle timeout.
+                    redraw = true;
                 }
                 // Printable keys go to the shell while the Terminal tab is
                 // open. The island is click-through when collapsed, so these
@@ -772,19 +821,13 @@ pub fn run() -> std::process::ExitCode {
             media.snapshot()
         };
         if snapshot != view.media {
-            // Playback policy (MusicNotch / Boring Notch behaviour): a track
-            // starting opens the island, and playback ending closes it again —
-            // but only if WE opened it, never a user-opened panel.
-            let (was, now_playing) = (view.media.playing, snapshot.playing);
-            if !was && now_playing {
-                if std::env::var("ARC_DEMO_MEDIA_NOEXPAND").ok().as_deref() != Some("1")
-                    && state.open_for_playback()
-                {
-                    dbg_reason(18);
-                }
-            } else if was && !now_playing && state.close_after_playback() {
-                dbg_reason(19);
-            }
+            // The island does NOT open itself for playback. A Windows media
+            // session can report "playing" forever (a browser tab left open,
+            // a muted player, a stream the user forgot), and then the notch sat
+            // open as a full panel with the pill unreachable — hovering it did
+            // nothing because there was no pill to hover. Now-playing shows in
+            // the pill and in the hover (peek) row; the panel opens on hover,
+            // click or the hotkey, like every other surface.
             view.media = snapshot;
             dbg_reason(15);
             redraw = true;
@@ -806,7 +849,16 @@ pub fn run() -> std::process::ExitCode {
             continue;
         }
         let now = Instant::now();
-        let dt = now.duration_since(last).min(Duration::from_millis(100));
+        // Cap the integrator's step at two display frames. A click or hotkey
+        // can land after a 200 ms park, and a 100 ms step threw the morph
+        // springs ~43 % of the way to their targets in one frame: the panel
+        // "opened instantly, no animation". 33 ms keeps a late transition a
+        // late transition instead of a jump.
+        let dt = now.duration_since(last).min(Duration::from_millis(33));
+        DBG_POLL_US.store(
+            now.duration_since(dbg_loop0).as_micros() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // The idle pet animates on its own clock: the frame index is a pure
         // function of wall time, so a changed frame means repaint. Only the
@@ -847,7 +899,13 @@ pub fn run() -> std::process::ExitCode {
             dbg_reason(20);
             redraw = true;
         }
-        if now.duration_since(last_power) >= POWER_POLL {
+        // Both polls below block on the OS (power: a WMI/API read; net: a
+        // WLAN query that costs ~80 ms). Running them mid-morph stalls the
+        // spring by a whole display frame, so they wait for the island to
+        // settle — a HUD that arms 300 ms later is invisible, a morph that
+        // hitches is not.
+        let settled = !state.busy();
+        if settled && now.duration_since(last_power) >= POWER_POLL {
             last_power = now;
             if let Some(p) = power::read() {
                 let armed = power_hud(&p, &mut last_power_state, now, &mut hud);
@@ -858,7 +916,7 @@ pub fn run() -> std::process::ExitCode {
                 }
             }
         }
-        if now.duration_since(last_net) >= NET_POLL {
+        if settled && now.duration_since(last_net) >= NET_POLL {
             last_net = now;
             let mut armed = net_hud(&net::sample(), &mut last_net_state, now, &mut hud);
             // Focus: transition-only, same rule as the other HUDs.
@@ -899,7 +957,6 @@ pub fn run() -> std::process::ExitCode {
             std::thread::sleep(IDLE_POLL);
             continue;
         }
-
         // Audio: read the worker's snapshot every frame (a mutex read) and arm
         // the volume HUD on change. The mic flag is not a HUD — it is a standing
         // indicator, so it just rides on the view.
@@ -943,7 +1000,6 @@ pub fn run() -> std::process::ExitCode {
             dbg_reason(23);
             redraw = true;
         }
-
         if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 4 {
             last = Instant::now();
             std::thread::sleep(IDLE_POLL);
@@ -1006,9 +1062,11 @@ pub fn run() -> std::process::ExitCode {
             redraw = true;
         }
 
-        // Hover is polled, not event-driven (the collapsed window is
+        // Hover is polled, not message-driven (the collapsed window is
         // click-through), so it has to be stepped even on frames where nothing
-        // else woke us up. It only ever folds a panel whose cursor left.
+        // else woke us up. The raw-input wake relay (`WM_MOUSE_WAKE`) makes
+        // the poll land within milliseconds of an approach/leave while
+        // resting on the pill. It only ever folds a panel whose cursor left.
         let po = overlay.pointer_over();
         let hover_changed = state.hover_step(po);
         // The tab swap runs its own springs; while either is live the island
@@ -1024,7 +1082,14 @@ pub fn run() -> std::process::ExitCode {
             [lvl(0), lvl(1), lvl(2), lvl(3)],
             view.media.playing,
         );
-        let animating = state.step_dt(dt.as_secs_f32()) || swap_busy || viz_busy;
+        // A morph that starts on this iteration must not integrate the gap
+        // since the last painted frame: after a park that gap is the whole poll
+        // interval (clamped to 100 ms), which threw the drop spring 43 % of the
+        // way to its target in a single step — the pill popped, then crawled.
+        // Starting from a zero step lets the spring ramp from rest on the next
+        // frame's normal dt.
+        let morph_dt = if hover_changed { 0.0 } else { dt.as_secs_f32() };
+        let animating = state.step_dt(morph_dt) || swap_busy || viz_busy;
 
 
         if std::env::var("ARC_DBG_SKIP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0) == 5 {
@@ -1156,19 +1221,33 @@ pub fn run() -> std::process::ExitCode {
                 win.present(&frame);
             }
         }
-
-        if std::env::var("ARC_DBG_LOOP").is_ok() {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(r"C:\Users\mrenm\AppData\Local\hermes\cache\scratch\arc_dbg.log")
+        if let Some(f) = dbg_log.as_mut() {
             {
+                use std::io::Write as _;
                 let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = writeln!(
                     f,
-                    "{} tid={} anim={} swap={} viz={} hover={} redraw={} po={} mode={} lw={} lh={} hw={} bh={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={}",
+                    "{} at={} park={} raw={} mv={} lv={} dt={} hx={} hy={} l={} r={} b={} ev={} polls={} slp={} want={} pre={} post={} poll={} svc={} tid={} anim={} swap={} viz={} hover={} redraw={} po={} mode={} lw={} lh={} hw={} bh={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={} tus={} tn={} tlen={}",
                     now.elapsed().as_micros(),
+                    DBG_AT_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_PARK_US.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::window::DBG_RAWINPUT.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::window::DBG_MOUSEMOVE.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::window::DBG_MOUSELEAVE.load(std::sync::atomic::Ordering::Relaxed),
+                    dt.as_micros(),
+                    crate::platform::window::DBG_HOVER.load(std::sync::atomic::Ordering::Relaxed) as u16 as i32,
+                    (crate::platform::window::DBG_HOVER.load(std::sync::atomic::Ordering::Relaxed) >> 16) as u16 as i32,
+                    (crate::platform::window::DBG_HOVER_R.load(std::sync::atomic::Ordering::Relaxed) & 0xffff) as i32,
+                    (crate::platform::window::DBG_HOVER_R.load(std::sync::atomic::Ordering::Relaxed) >> 16) as i32,
+                    crate::platform::window::DBG_HOVER_B.load(std::sync::atomic::Ordering::Relaxed) as i32,
+                    DBG_EV_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_POLLS_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_SLEEP_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_WANT_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_PRE_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_POST_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_POLL_US.load(std::sync::atomic::Ordering::Relaxed),
+                    DBG_SVC_US.load(std::sync::atomic::Ordering::Relaxed),
                     tid,
                     animating,
                     view.tab_swap.debug_busy(),
@@ -1183,13 +1262,26 @@ pub fn run() -> std::process::ExitCode {
                     overlay.body_height(),
                     DBG_DRAW_US.load(std::sync::atomic::Ordering::Relaxed),
                     DBG_BUILD_US.load(std::sync::atomic::Ordering::Relaxed),
+                    // TEMP: glyph CPU time within this frame
                     DBG_PRESENT_US.load(std::sync::atomic::Ordering::Relaxed),
                     dbg_take_reasons(),
                     crate::platform::render::DBG_ACQ_US.load(std::sync::atomic::Ordering::Relaxed),
                     crate::platform::render::DBG_ENDDRAW_US.load(std::sync::atomic::Ordering::Relaxed),
                     crate::platform::render::DBG_RS_PRESENT_US.load(std::sync::atomic::Ordering::Relaxed),
-                    crate::platform::render::DBG_NODES.load(std::sync::atomic::Ordering::Relaxed)
+                    crate::platform::render::DBG_NODES.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::render::DBG_TEXT_US.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::render::DBG_TEXT_N.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::platform::render::DBG_TEXT_LEN.load(std::sync::atomic::Ordering::Relaxed),
                 );
+                // Flush every 16 lines, not per line: a per-line flush is a
+                // synchronous disk round-trip inside the frame loop and it
+                // showed up as 40-70 ms "hitches" that were the logger, not
+                // the renderer. The harness kills the process, so the tail is
+                // lost — 16 lines of slack is invisible in the percentiles.
+                dbg_lines += 1;
+                if dbg_lines % 4 == 0 {
+                    let _ = f.flush();
+                }
             }
         }
 
@@ -1198,10 +1290,29 @@ pub fn run() -> std::process::ExitCode {
             std::thread::sleep(IDLE_POLL);
             continue;
         }
-
         if animating || hover_changed || redraw {
             last = now;
+            // Pace to the display. `Present(0)` only queues the buffer, so an
+            // unpaced loop free-runs at ~180 fps and DWM drops most of the
+            // frames — the morph then looks like it stutters while the log
+            // says 5 ms a frame. `timeBeginPeriod(1)` in `run` makes this
+            // sleep land within a millisecond instead of rounding up to the
+            // 15.6 ms system tick.
+            let deadline = frame_clock + FRAME_PERIOD;
+            frame_clock = if deadline.elapsed().as_millis() > 4 {
+                Instant::now()
+            } else {
+                deadline
+            };
+            // Pace the morph to the display, not to how fast D2D can draw.
+            // `Present(1)` on a composition swapchain only queues the buffer —
+            // it does not wait for a vblank — so an unpaced loop free-runs at
+            // 200+ fps of 640x248 transparent frames on an iGPU and DWM drops
+            // most of them: the morph then *looks* like it is stuttering while
+            // the log says 8 ms a frame. Sleeping to a 60 Hz deadline costs
+            // nothing when a frame already overran it.
             let dbg_draw_t0 = Instant::now();
+            DBG_POLLS_US.store(dbg_draw_t0.duration_since(dbg_loop0).as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
 
             // Fixed frame: these calls early-out unless mode/DPI/monitor
             // changed, so the morph costs no SetWindowPos and no ResizeBuffers.
@@ -1233,7 +1344,10 @@ pub fn run() -> std::process::ExitCode {
                 dt.as_secs_f32(),
                 state.body_offset_x(),
                 state.body_offset_y(),
-                animating,
+                // Sync 0: the loop's own `frame_clock` sleep paces the morph
+                // (see below). Present(1) here does not wait for a vblank on a
+                // composition swapchain — it only added a DWM round-trip.
+                false,
             );
             let dbg_t3 = Instant::now();
             DBG_DRAW_US.store(
@@ -1248,18 +1362,32 @@ pub fn run() -> std::process::ExitCode {
                 dbg_t3.duration_since(dbg_t2).as_micros() as usize,
                 std::sync::atomic::Ordering::Relaxed,
             );
+            DBG_PRE_US.store(dbg_t3.duration_since(dbg_loop0).as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
+            let dbg_sl0 = Instant::now();
+            let dbg_want = frame_clock.saturating_duration_since(dbg_sl0);
+            std::thread::sleep(dbg_want);
+            DBG_POST_US.store(dbg_sl0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
+            DBG_SLEEP_US.store(dbg_sl0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
+            DBG_WANT_US.store(dbg_want.as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
         } else {
-            // Park: no presents, no spring integration. Re-arm the clock so the
-            // first animating frame measures a sane dt.
+            // Park: no presents, no spring integration. The clock is re-armed
+            // *after* the sleep, not before: otherwise the first frame of the
+            // next morph measures the whole idle gap (200 ms, clamped to the
+            // integrator's 66 ms ceiling) and the spring jumps a third of the
+            // way to its target in one step — a visible pop at the start of
+            // every transition.
+            // Park on the *input queue*, not on a bare sleep: the posted
+            // `WM_MOUSE_WAKE` relay (raw mouse input near the body) is what
+            // should start a hover morph, and `sleep` made it wait out the
+            // whole poll interval first.
+            let dbg_p0 = Instant::now();
+            overlay.wait_for_input(IDLE_POLL);
+            DBG_PARK_US.store(dbg_p0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
             last = Instant::now();
-            std::thread::sleep(IDLE_POLL);
         }
 
-        if animating {
-            let elapsed = NOMINAL_FRAME.saturating_sub(last.elapsed());
-            if !elapsed.is_zero() {
-                std::thread::sleep(elapsed);
-            }
-        }
+        // No manual frame pacing: `present(sync = animating)` already blocks on
+        // vblank while a spring is live, so a sleep here would stack a second
+        // 16 ms wait on top of vsync and halve the morph's frame rate.
     }
 }
