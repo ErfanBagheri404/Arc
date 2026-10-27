@@ -574,6 +574,11 @@ pub fn run() -> std::process::ExitCode {
             state.body_offset_y(),
             !state.busy(),
         );
+        // The hover machine reads a STABLE rect (spring targets) so a cursor
+        // resting near the pill's edge cannot flip Collapsed↔Peek while the
+        // live body slides under it mid-morph.
+        let (hover_w, hover_h, hover_oy) = state.hover_box();
+        overlay.set_hover_target(hover_w, hover_h, hover_oy);
         let dbg_e0 = Instant::now();
         let events = overlay.pump_events();
         DBG_EV_US.store(dbg_e0.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
@@ -1066,9 +1071,14 @@ pub fn run() -> std::process::ExitCode {
         // click-through), so it has to be stepped even on frames where nothing
         // else woke us up. The raw-input wake relay (`WM_MOUSE_WAKE`) makes
         // the poll land within milliseconds of an approach/leave while
-        // resting on the pill. It only ever folds a panel whose cursor left.
-        let po = overlay.pointer_over();
-        let hover_changed = state.hover_step(po);
+        // resting on the pill. The machine's pause is hysteresis, not a
+        // timeout: the exact band decides entry, the band (grown by a few px)
+        // decides folding — a hand resting on the pill's edge holds the
+        // current mode instead of entering/leaving every jitter step.
+        let stay_margin = overlay.dpi().snap(8.0) as i32;
+        let po = overlay.pointer_over(0);
+        let po_stay = overlay.pointer_over(stay_margin);
+        let hover_changed = state.hover_step(po, po_stay);
         // The tab swap runs its own springs; while either is live the island
         // repaints so the crossfade/rise plays out.
         let swap_busy = view.tab_swap.step(dt.as_secs_f32());
@@ -1227,7 +1237,7 @@ pub fn run() -> std::process::ExitCode {
                 let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = writeln!(
                     f,
-                    "{} at={} park={} raw={} mv={} lv={} dt={} hx={} hy={} l={} r={} b={} ev={} polls={} slp={} want={} pre={} post={} poll={} svc={} tid={} anim={} swap={} viz={} hover={} redraw={} po={} mode={} lw={} lh={} hw={} bh={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={} tus={} tn={} tlen={}",
+                    "{} at={} park={} raw={} mv={} lv={} dt={} lw={} lh={} loy={} staym={} poS={} hx={} hy={} l={} r={} b={} ev={} polls={} slp={} want={} pre={} post={} poll={} svc={} tid={} anim={} swap={} viz={} hover={} redraw={} po={} mode={} hw={} bh={} draw={} build={} present={} why={} acq={} enddraw={} rpresent={} nodes={} tus={} tn={} tlen={}",
                     now.elapsed().as_micros(),
                     DBG_AT_US.load(std::sync::atomic::Ordering::Relaxed),
                     DBG_PARK_US.load(std::sync::atomic::Ordering::Relaxed),
@@ -1235,6 +1245,14 @@ pub fn run() -> std::process::ExitCode {
                     crate::platform::window::DBG_MOUSEMOVE.load(std::sync::atomic::Ordering::Relaxed),
                     crate::platform::window::DBG_MOUSELEAVE.load(std::sync::atomic::Ordering::Relaxed),
                     dt.as_micros(),
+                    // hover machine inputs this pass: body targets (logical),
+                    // drop, the stay margin, the stay poll, then the
+                    // exact-band poll reads packed below.
+                    state.logical_width(),
+                    state.logical_height(),
+                    state.body_offset_y(),
+                    stay_margin,
+                    po_stay,
                     crate::platform::window::DBG_HOVER.load(std::sync::atomic::Ordering::Relaxed) as u16 as i32,
                     (crate::platform::window::DBG_HOVER.load(std::sync::atomic::Ordering::Relaxed) >> 16) as u16 as i32,
                     (crate::platform::window::DBG_HOVER_R.load(std::sync::atomic::Ordering::Relaxed) & 0xffff) as i32,
@@ -1256,8 +1274,6 @@ pub fn run() -> std::process::ExitCode {
                     redraw,
                     po,
                     format!("{:?}", state.mode()),
-                    state.logical_width(),
-                    state.logical_height(),
                     overlay.hover_width_px(),
                     overlay.body_height(),
                     DBG_DRAW_US.load(std::sync::atomic::Ordering::Relaxed),

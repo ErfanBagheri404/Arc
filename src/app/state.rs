@@ -307,10 +307,16 @@ impl IslandState {
     ///
     /// Three-way ladder, the user's explicit model: minimized pill is the rest
     /// state, hover grows it into the peek pill, a press opens the panel.
-    /// Hover therefore never reaches [`WindowMode::Expanded`]. Leaving the
-    /// body folds whatever is open; an auto-expanded (playback) panel stays
-    /// until playback stops.
-    pub fn hover_step(&mut self, pointer_over: bool) -> bool {
+    /// Hover therefore never reaches [`WindowMode::Expanded`]. An auto-expanded
+    /// (playback) panel stays until playback stops.
+    ///
+    /// `po_enter` is the exact body test, `po_stay` the same rect grown by a
+    /// few px. Every entry pulls `po_enter`, every fold pulls `po_stay` —
+    /// hysteresis: the two thresholds never overlap, so a hand resting on the
+    /// pill's edge band holds the current mode instead of the enter/leave
+    /// ping-pong that left the pill stuck mid-flap ("unhover does a few times
+    /// then doesn't minimize").
+    pub fn hover_step(&mut self, po_enter: bool, po_stay: bool) -> bool {
         // Hidden for a fullscreen app: hover must not pull the island back
         // over the video the user is watching.
         if self.mode == WindowMode::Hidden {
@@ -319,24 +325,44 @@ impl IslandState {
 
         // The panel folds when the cursor leaves, however it was opened
         // (click, hotkey). Playback keeps it.
-        if self.mode == WindowMode::Expanded && !pointer_over && !self.auto_expanded {
+        if self.mode == WindowMode::Expanded && !po_stay && !self.auto_expanded {
             self.mode = WindowMode::Collapsed;
             self.retarget();
             return true;
         }
 
-        // Peek tracks the cursor: over the pill it grows, away it shrinks.
-        if self.mode == WindowMode::Collapsed && pointer_over {
+        // Peek tracks the cursor: over the pill it grows, clearly off it
+        // (stay-band miss) it shrinks.
+        if self.mode == WindowMode::Collapsed && po_enter {
             self.mode = WindowMode::Peek;
             self.retarget();
             return true;
         }
-        if self.mode == WindowMode::Peek && !pointer_over {
+        if self.mode == WindowMode::Peek && !po_stay {
             self.mode = WindowMode::Collapsed;
             self.retarget();
             return true;
         }
         false
+    }
+
+    /// The hover machine's STABLE rect: spring *targets*, not live values.
+    ///
+    /// `pointer_over` is what decides enter/leave, and the live body rect
+    /// moves under the cursor during a morph: collapse pulls the pill's right
+    /// edge past a resting cursor, hover fires again, the pill re-widens and
+    /// the two modes ping-pong — the pill ends up stuck at a mid width
+    /// ("unhover gets stuck a few times then doesn't minimize"). A rect made
+    /// of targets cannot flip mid-morph: the cursor is either inside the
+    /// shape this mode is heading for or it is not, and the springs finish.
+    /// Targets are the spring targets directly (`width`/`height` = PILL/PEEK/
+    /// PANEL consts via `retarget`, `drop` = the peek's downward offset).
+    pub fn hover_box(&self) -> (f32, f32, f32) {
+        (
+            self.width.target(),
+            self.height.target(),
+            self.drop.target().max(0.0),
+        )
     }
 
     pub fn logical_width(&self) -> f32 {
@@ -566,30 +592,30 @@ mod tests {
     fn hover_peeks_the_pill_and_leaving_folds_it_back() {
         let mut s = IslandState::collapsed();
         // Hover grows the minimized pill into the peek pill — and stops there.
-        assert!(s.hover_step(true));
+        assert!(s.hover_step(true, true));
         assert_eq!(s.mode(), WindowMode::Peek);
         // Settled: it stays a pill, never the panel.
         for _ in 0..50 {
-            assert!(!s.hover_step(true));
+            assert!(!s.hover_step(true, true));
         }
         assert_eq!(s.mode(), WindowMode::Peek);
         assert!(!s.expanded());
         assert!(s.logical_width() <= crate::ui::layout::PEEK_W_REF + 0.5);
 
         // Away from it → back to the minimized pill.
-        assert!(s.hover_step(false));
+        assert!(s.hover_step(false, false));
         assert_eq!(s.mode(), WindowMode::Collapsed);
         assert!(!s.expanded());
 
         // Press the pill: that is the panel.
-        s.hover_step(true);
+        s.hover_step(true, true);
         s.toggle();
         assert!(s.expanded());
         // The panel stays under the cursor.
-        assert!(!s.hover_step(true));
+        assert!(!s.hover_step(true, true));
         assert!(s.expanded());
         // Cursor leaves → all the way back to the minimized pill.
-        assert!(s.hover_step(false));
+        assert!(s.hover_step(false, false));
         assert_eq!(s.mode(), WindowMode::Collapsed);
     }
 
@@ -600,12 +626,12 @@ mod tests {
         assert!(s.expanded());
         // Cursor sits elsewhere: one step later the panel must fold itself,
         // with no tray click.
-        assert!(s.hover_step(false));
+        assert!(s.hover_step(false, false));
         assert_eq!(s.mode(), WindowMode::Collapsed);
         // ... while the cursor on the body keeps it open.
         let mut k = IslandState::collapsed();
         k.toggle();
-        assert!(!k.hover_step(true));
+        assert!(!k.hover_step(true, true));
         assert!(k.expanded());
     }
 
@@ -617,12 +643,12 @@ mod tests {
         // Cursor off the panel → it folds. Whatever opened it (hotkey, click),
         // a panel never outlives the cursor's presence — otherwise it sits
         // there until the user finds the tray icon.
-        assert!(s.hover_step(false));
+        assert!(s.hover_step(false, false));
         assert!(!s.expanded());
         // Returning to the body peeks the pill but must NOT reopen the panel.
-        assert!(s.hover_step(true));
+        assert!(s.hover_step(true, true));
         for _ in 0..10 {
-            assert!(!s.hover_step(true));
+            assert!(!s.hover_step(true, true));
         }
         assert_eq!(s.mode(), WindowMode::Peek);
     }
@@ -633,7 +659,7 @@ mod tests {
         s.hide();
         // Hover while fullscreen-hid must not open the panel on restore.
         for _ in 0..20 {
-            s.hover_step(true);
+            s.hover_step(true, true);
         }
         assert!(s.hidden(), "hover must not un-hide the island");
     }
@@ -646,7 +672,7 @@ mod tests {
         assert!(s.auto_expanded());
         // While auto-expanded, the cursor leaving the body must not collapse it.
         for _ in 0..20 {
-            s.hover_step(false);
+            s.hover_step(false, false);
         }
         assert!(s.expanded(), "an auto-opened panel survives a cursor-leave");
         assert!(s.close_after_playback(), "playback ending must close it again");
@@ -732,7 +758,7 @@ mod tests {
     #[test]
     fn hovering_never_bounces_the_pill_past_its_rest_width() {
         let mut s = IslandState::collapsed();
-        assert!(s.hover_step(true), "cursor over the pill must peek it");
+        assert!(s.hover_step(true, true), "cursor over the pill must peek it");
         let (mut peak, mut trough) = (s.logical_width(), s.logical_width());
         let mut t = 0.0;
         while s.step_dt(1.0 / 240.0) && t < 2.0 {

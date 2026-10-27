@@ -726,6 +726,11 @@ pub struct Overlay {
     dpi: Dpi,
     /// Body width in physical px for hover hit-testing (frame is fixed max).
     hover_width_px: i32,
+    /// Hover machine's stable rect (physical px): spring targets from the app
+    /// state, refreshed every loop pass via `hover_box()`. `pointer_over`
+    /// must decide against THIS, never against the live body — the live rect
+    /// moves under the cursor mid-morph and makes Collapsed/Peek ping-pong.
+    hover_target_px: (i32, i32, i32),
     state: Box<State>,
     monitor: HMONITOR,
     logical_size: (f32, f32),
@@ -807,6 +812,7 @@ impl Overlay {
             hwnd,
             dpi: Self::query_dpi(hwnd),
             hover_width_px: 185,
+            hover_target_px: (185, 32, 0),
             state,
             // SAFETY: read-only query on a valid HWND.
             monitor: unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
@@ -969,7 +975,11 @@ impl Overlay {
     /// hover-dwell has nothing to listen to. The raw-input sink's wake relay
     /// only changes *when* this gets polled (on approach/leave it is right
     /// after the move), this check stays the single source of truth.
-    pub fn pointer_over(&self) -> bool {
+    ///
+    /// `margin` grows the band by that many px on left/right/bottom — used
+    /// twice with different values as the hover machine's hysteresis pair
+    /// (`0` to enter, a few px to keep holding; see `IslandState::hover_step`).
+    pub fn pointer_over(&self, margin: i32) -> bool {
         let mut p = POINT::default();
         // SAFETY: `p` is a valid POINT for the call's duration.
         if unsafe { GetCursorPos(&mut p) }.is_err() {
@@ -979,15 +989,16 @@ impl Overlay {
             return false;
         };
         // The window is a fixed max frame; the visible body is centred inside
-        // it (`set_body` keeps every field in sync). Bound x *and* y by the
-        // live body: without the height bound, sweeping the cursor under a
-        // collapsed pill would dwell-hover it open and cover the very thing
-        // the user was aiming at near the notch.
-        let inset = (rect.right - rect.left - self.hover_width_px.max(1)) / 2;
+        // it. Bound x *and* y by the hover TARGET rect, not the live body:
+        // during a morph the live rect slides under a resting cursor and the
+        // Collapsed↔Peek ladder flips back and forth (the pill landing stuck
+        // at a mid width). Targets match the rect the machine is heading
+        // for, so the decision is stable for the whole morph.
+        let (tw, th, toy) = self.hover_target_px;
+        let inset = (rect.right - rect.left - tw.max(1)) / 2;
         let (l, r) = (rect.left + inset, rect.right - inset);
-        let offset_y = self.state.body_offset_y.max(0);
-        let bottom = rect.top + offset_y + self.state.body_height.max(1);
-        let inside = p.x >= l && p.x < r && p.y >= rect.top && p.y < bottom;
+        let bottom = rect.top + toy.max(0) + th.max(1);
+        let inside = p.x >= l - margin && p.x < r + margin && p.y >= rect.top && p.y < bottom + margin;
         if std::env::var("ARC_DBG_LOOP").is_ok() {
             DBG_HOVER.store(
                 ((p.x as usize) & 0xffff) | (((p.y as usize) & 0xffff) << 16),
@@ -1000,6 +1011,17 @@ impl Overlay {
             DBG_HOVER_B.store(bottom as usize, std::sync::atomic::Ordering::Relaxed);
         }
         inside
+    }
+
+    /// Accept the hover machine's stable rect for this pass: spring targets
+    /// in logical px, snapped to physical like `set_body` does.
+    pub fn set_hover_target(&mut self, logical_w: f32, logical_h: f32, offset_y: f32) {
+        let d = self.dpi();
+        self.hover_target_px = (
+            d.snap(logical_w).max(1) as i32,
+            d.snap(logical_h).max(1) as i32,
+            d.snap_offset(offset_y),
+        );
     }
 
     /// Live body size in physical px, for `ARC_DBG_LOOP` frame logs.
