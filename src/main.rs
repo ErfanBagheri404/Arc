@@ -33,5 +33,20 @@ static LOGGER: Stderr = Stderr;
 fn main() -> std::process::ExitCode {
     // Fails only if something else already claimed the global logger.
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
+    // Release aborts on panic, so without a hook a panic in any service thread
+    // kills the overlay with no trace. This hook runs before the abort.
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<no location>".into());
+        let path = std::env::temp_dir().join("arc_panic.log");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| writeln!(f, "{at} :: {info}"));
+    }));
     app::run()
 }
