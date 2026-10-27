@@ -191,13 +191,15 @@ impl IslandState {
         };
         match self.mode {
             // VNotch's morph BOUNCES: height drops first and overshoots, width
-            // spreads after it, radius trails — each springs past its target and
+            // spreads after it; radius moves with the width — each springs past its target and
             // settles back, which is what makes the island read as alive instead
             // of as a box that changed size.
             WindowMode::Expanded => {
                 self.width.set_config(SpringConfig::new(0.34, 1.0));
                 self.height.set_config(SpringConfig::new(0.36, 1.0));
-                self.radius.set_config(SpringConfig::new(0.40, 1.0));
+                // Radius keeps pace with the width: the top corners must round
+                // off with the spread, not after it.
+                self.radius.set_config(SpringConfig::new(0.34, 1.0));
                 self.drop.set_config(SpringConfig::new(0.30, 1.0));
             }
             // Hover: a short bob. The drop is the only spring that moves, so
@@ -211,7 +213,8 @@ impl IslandState {
                 // off, never as a spring ringing past its rest spot.
                 self.width.set_config(SpringConfig::new(0.26, 1.0));
                 self.height.set_config(SpringConfig::new(0.30, 1.0));
-                self.radius.set_config(SpringConfig::new(0.30, 1.0));
+                // Tied to width so the capsule forms with the glide.
+                self.radius.set_config(SpringConfig::new(0.26, 1.0));
                 self.drop.set_config(SpringConfig::new(0.34, 1.0));
             }
             // Collapse into the smaller state including a peek release:
@@ -222,7 +225,8 @@ impl IslandState {
             _ => {
                 self.width.set_config(SpringConfig::new(0.26, 1.0));
                 self.height.set_config(SpringConfig::new(0.32, 1.0));
-                self.radius.set_config(SpringConfig::new(0.28, 1.0));
+                // Tied to width: the pill should be round by the time it lands.
+                self.radius.set_config(SpringConfig::new(0.26, 1.0));
                 self.drop.set_config(SpringConfig::new(0.22, 1.0));
             }
         }
