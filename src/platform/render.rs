@@ -23,13 +23,13 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget,
-    ID2D1Bitmap, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1PathGeometry,
+    ID2D1Bitmap, ID2D1DeviceContext, ID2D1Factory1, ID2D1PathGeometry,
     ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, ID2D1Bitmap1,
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS, D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::{
@@ -256,33 +256,6 @@ macro_rules! step {
 /// and the composition silently never updates. Holding one render target for the
 /// life of the window is therefore a no-op bug, so the target is acquired before
 /// drawing and dropped before presenting.
-fn acquire_target(
-    d2d: &ID2D1Factory,
-    swapchain: &IDXGISwapChain1,
-    index: u32,
-    scale: f32,
-) -> windows::core::Result<ID2D1RenderTarget> {
-    let surface: IDXGISurface = step!("GetBuffer", unsafe { swapchain.GetBuffer(index) });
-    let props = D2D1_RENDER_TARGET_PROPERTIES {
-        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        // The scene is authored in DIPs, the back buffer is physical pixels.
-        // Reporting the real DPI is what makes 185 DIPs land on 231 px, so the
-        // island is centred and sharp instead of top-left pinned and undersized.
-        dpiX: 96.0 * scale,
-        dpiY: 96.0 * scale,
-        usage: D2D1_RENDER_TARGET_USAGE_NONE,
-        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-    };
-    let target = step!("CreateDxgiSurfaceRenderTarget", unsafe {
-        d2d.CreateDxgiSurfaceRenderTarget(&surface, &props)
-    });
-    Ok(target)
-}
-
 /// Replays a scene onto the overlay's swapchain.
 pub struct Renderer {
     hwnd: HWND,
@@ -309,20 +282,17 @@ pub struct Renderer {
     /// frame was the morph's biggest cost: `CreateBitmapFromWicBitmap` copies
     /// and converts the whole image inside `EndDraw`, ~11 ms for the demo art.
     bitmaps: HashMap<ImageHandle, ID2D1Bitmap>,
-    /// One render target per back buffer, kept alive.
-    ///
-    /// A D2D render target owns the glyph cache and the brush/geometry caches
-    /// for its surface. Building a fresh one every frame threw all of that
-    /// away, so the first `EndDraw` of every morph re-rasterised every glyph
-    /// run on the CPU — a 38 ms stall in the first two frames, which is
-    /// exactly what the expand looked like. Flip-model buffers rotate, so
-    /// cache by index and only drop the set when the chain is resized.
-    targets: Vec<Option<ID2D1RenderTarget>>,
-    /// Device-level context used only to *own* bitmaps: a bitmap made by a
-    /// render target dies with it, and this renderer builds a fresh target per
-    /// frame. A device context's bitmaps are valid on every target of the same
-    /// device, so one decode lasts the whole session.
-    bitmap_owner: Option<ID2D1DeviceContext>,
+    /// The one D2D device context every frame draws through. Targets made by
+    /// `CreateDxgiSurfaceRenderTarget` are target-bound: a bitmap or brush
+    /// minted on one fails on the next frame with "the resource was realized
+    /// on the wrong render target", the whole `EndDraw` aborts and the island
+    /// never appears. A device context mints device-level brushes and bitmaps
+    /// that are valid for the session, and binding a frame is `SetTarget` on a
+    /// fresh back-buffer bitmap instead of building a target per frame.
+    dc: Option<ID2D1DeviceContext>,
+    /// Back-buffer bitmap currently bound as `dc`'s target. `SetTarget` does
+    /// not keep it alive; this field does.
+    frame_bitmap: Option<ID2D1Bitmap1>,
     /// Handle signalled when the chain can take another frame. Waited on once
     /// per `present`; it *is* the display-rate pacing.
     latency_wait: windows::Win32::Foundation::HANDLE,
@@ -344,11 +314,7 @@ pub struct Renderer {
     /// per frame was the idle burn: a 40 px pill cost ~20 ms of CPU a second.
     /// Animated fades mint new colours every frame, so the map is dropped
     /// wholesale once it grows past `64` rather than leaking.
-    brushes: HashMap<([u32; 4], usize), ID2D1SolidColorBrush>,
-    /// Back-buffer slot the current frame draws into. Brushes are minted *on*
-    /// a render target, so one made for buffer 0 cannot be used on buffer 1 —
-    /// it fails with D2DERR_WRONG_RESOURCE_DOMAIN and the frame draws nothing.
-    target_slot: usize,
+    brushes: HashMap<[u32; 4], ID2D1SolidColorBrush>,
     /// Filled path geometries keyed by the exact shape that produced them. A
     /// committed geometry cannot be re-`Open`ed, so the only way to avoid
     /// rebuilding an unchanged outline every frame is to keep the finished
@@ -386,14 +352,13 @@ impl Renderer {
             font_collection: None,
             formats: HashMap::new(),
             bitmaps: HashMap::new(),
-            targets: Vec::new(),
-            bitmap_owner: None,
+            dc: None,
+            frame_bitmap: None,
             latency_wait: windows::Win32::Foundation::HANDLE::default(),
             last_present: std::time::Instant::now(),
             wic: None,
             images: HashMap::new(),
             brushes: HashMap::new(),
-            target_slot: 0,
             geom_cache: HashMap::new(),
             stroke_style: None,
             scratch_utf16: Vec::with_capacity(64),
@@ -428,9 +393,9 @@ impl Renderer {
             let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.latency_wait) };
             self.latency_wait = windows::Win32::Foundation::HANDLE::default();
         }
-        self.targets.clear();
         self.bitmaps.clear();
-        self.bitmap_owner = None;
+        self.frame_bitmap = None;
+        self.dc = None;
         self.swapchain = None;
         self.visual = None;
         self.dcomp_target = None;
@@ -548,14 +513,15 @@ impl Renderer {
 
         let d2d: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-        // Bitmaps are owned by a device context so they outlive the per-frame
-        // render targets (see `bitmap_owner`).
-        self.bitmap_owner = d2d
+        // One device context owns the frame target and every device-level
+        // bitmap and brush (see `dc`).
+        self.dc = d2d
             .cast::<ID2D1Factory1>()
             .ok()
             .and_then(|factory| unsafe { factory.CreateDevice(&dxgi).ok() })
             .and_then(|device| unsafe { device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS(0)).ok() });
         self.bitmaps.clear();
+        self.frame_bitmap = None;
         let dwrite: IDWriteFactory = step!("DWriteCreateFactory", unsafe {
             DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
         });
@@ -612,14 +578,9 @@ impl Renderer {
             self.rebuild(width, height);
             return;
         };
-        // Flip-model back buffers cannot rotate while a reference is alive,
-        // so drop every cached render target before handing the chain back.
-        self.targets.clear();
-        // Brushes and geometries are minted *on* a target, so they are dead
-        // once it is gone: reusing them on the rebuilt target fails the whole
-        // frame with D2DERR_WRONG_RESOURCE_DOMAIN and nothing draws at all.
-        self.brushes.clear();
-        self.geom_cache.clear();
+        // The bound target bitmap must go before `ResizeBuffers`; brushes,
+        // bitmaps and geometries are device- or factory-level and survive.
+        self.unbind_frame();
         // SAFETY: our own swapchain; no buffer references are outstanding.
         let resized = unsafe {
             swapchain.ResizeBuffers(
@@ -634,6 +595,42 @@ impl Renderer {
             // A failed resize can leave the chain unusable; rebuild once.
             self.rebuild(width, height);
         }
+    }
+
+    /// Bind back buffer `index` to the device context and hand back the
+    /// target to draw through. The context survives across frames; only the
+    /// target bitmap is per frame, and `SetTarget` is a pointer swap instead
+    /// of building a render target (which would invalidate every cached
+    /// brush and bitmap with it).
+    fn bind_frame(&mut self, index: u32, scale: f32) -> Option<ID2D1RenderTarget> {
+        let (dc, swapchain) = (self.dc.clone()?, self.swapchain.clone()?);
+        let surface: IDXGISurface = unsafe { swapchain.GetBuffer(index) }.ok()?;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            // The scene is authored in DIPs, the back buffer is physical
+            // pixels. Reporting the real DPI is what makes 185 DIPs land on
+            // 231 px, so the island is centred and sharp instead of
+            // top-left pinned and undersized.
+            dpiX: 96.0 * scale,
+            dpiY: 96.0 * scale,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let bitmap = unsafe { dc.CreateBitmapFromDxgiSurface(&surface, Some(&props)) }.ok()?;
+        let _ = unsafe { dc.SetTarget(&bitmap) };
+        self.frame_bitmap = Some(bitmap);
+        dc.cast::<ID2D1RenderTarget>().ok()
+    }
+
+    /// Release the back buffer before the chain rotates or resizes.
+    fn unbind_frame(&mut self) {
+        if let Some(dc) = &self.dc {
+            let _ = unsafe { dc.SetTarget(None) };
+        }
+        self.frame_bitmap = None;
     }
 
     /// Draw one frame and present it.
@@ -660,12 +657,13 @@ impl Renderer {
         if self.degraded || self.dead {
             return;
         }
-        // Drop the previous frame's render target *before* touching the swapchain:
-        // a flip-model back buffer cannot rotate while a reference is alive.
-        let (Some(swapchain), Some(d2d)) = (self.swapchain.clone(), self.d2d_factory.clone())
-        else {
+        // Release the previous frame's back buffer *before* touching the
+        // swapchain: a flip-model buffer cannot rotate while a reference is
+        // alive.
+        let Some(swapchain) = self.swapchain.clone() else {
             return;
         };
+        self.unbind_frame();
         // Block until the chain has room for this frame. Returns at the next
         // composition pass, so the loop runs at the display's rate instead of
         // as fast as D2D can draw. 200 ms guards a wedged compositor.
@@ -688,30 +686,20 @@ impl Renderer {
         }
         self.last_present = std::time::Instant::now();
         let dbg_a0 = std::time::Instant::now();
-        // One render target per back buffer, reused: a target owns the glyph
-        // and brush caches for its surface, so rebuilding one per frame made
-        // the first `EndDraw` of every morph re-rasterise every glyph run.
+        // Bind this frame's back buffer. Only the target bitmap is per frame;
+        // the context, its brushes and its bitmaps are device-level and live
+        // for the session.
         let index = match swapchain.cast::<IDXGISwapChain3>() {
             Ok(chain3) => unsafe { chain3.GetCurrentBackBufferIndex() },
             Err(_) => 0,
-        } as usize;
-        if self.targets.len() <= index {
-            self.targets.resize_with(index + 1, || None);
-        }
-        self.target_slot = index;
-        let target = match self.targets[index].clone() {
-            Some(cached) => cached,
-            None => match acquire_target(&d2d, &swapchain, index as u32, scale) {
-                Ok(fresh) => {
-                    self.targets[index] = Some(fresh.clone());
-                    fresh
-                }
-                Err(error) => {
-                    log::error!("arc: could not bind a render target to the back buffer ({error})");
-                    self.degraded = true;
-                    return;
-                }
-            },
+        };
+        let target = match self.bind_frame(index, scale) {
+            Some(target) => target,
+            None => {
+                log::error!("arc: could not bind the back buffer to the device context");
+                self.degraded = true;
+                return;
+            }
         };
 
         DBG_ACQ_US.store(
@@ -1233,7 +1221,7 @@ impl Renderer {
             dpiX: 96.0,
             dpiY: 96.0,
         };
-        let bitmap = match &self.bitmap_owner {
+        let bitmap = match &self.dc {
             Some(owner) => unsafe {
                 owner.CreateBitmapFromWicBitmap(
                     &source,
@@ -1292,7 +1280,7 @@ impl Renderer {
 
     fn brush(&mut self, target: &ID2D1RenderTarget, color: Rgba) -> Option<ID2D1SolidColorBrush> {
         let color = premultiply(color);
-        let key = (color_key(&color), self.target_slot);
+        let key = color_key(&color);
         if let Some(cached) = self.brushes.get(&key) {
             return Some(cached.clone());
         }
