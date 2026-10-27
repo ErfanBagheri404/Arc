@@ -621,6 +621,11 @@ impl Renderer {
         };
         let bitmap = unsafe { dc.CreateBitmapFromDxgiSurface(&surface, Some(&props)) }.ok()?;
         let _ = unsafe { dc.SetTarget(&bitmap) };
+        // The context keeps its own DPI (96 by default) and does NOT adopt the
+        // target bitmap's: without this the whole scene renders at 96 DPI in a
+        // buffer sized for 96*scale, so the island comes out 0.8x too small and
+        // pinned toward the top-left instead of centred.
+        let _ = unsafe { dc.SetDpi(96.0 * scale, 96.0 * scale) };
         self.frame_bitmap = Some(bitmap);
         dc.cast::<ID2D1RenderTarget>().ok()
     }
