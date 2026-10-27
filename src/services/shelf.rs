@@ -107,6 +107,32 @@ pub fn open(path: &Path) -> bool {
     r.0 as isize > 32
 }
 
+/// Open a URI with the OS handler (`ms-settings:bluetooth`, the network
+/// page): same threshold and same one `ShellExecuteW` call as [`open`]. The
+/// OS's own settings UI is the right surface for a radio toggle Arc should
+/// not own — the WinRT `Radio` API would be a whole second API for one
+/// switch, and Windows already handles the pairing/permission cases.
+pub fn open_uri(uri: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: both strings are null-terminated and live for the call.
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    r.0 as isize > 32
+}
+
 /// The pinned shelf, loaded from settings and persisted on every change.
 pub struct Shelf {
     items: Vec<Item>,

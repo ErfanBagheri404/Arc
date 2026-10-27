@@ -1806,7 +1806,87 @@ fn glyph_shapes(name: &str, rect: &Rect) -> Option<Vec<GlyphShape>> {
             );
             v
         }
-            _ => return None,
+        "cloud" => {
+            let sw = 1.2;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            pen(
+                &mut v,
+                &[
+                    [0.18, 0.62], [0.18, 0.48], [0.28, 0.38], [0.40, 0.32],
+                    [0.55, 0.30], [0.72, 0.36], [0.84, 0.46], [0.84, 0.62],
+                ],
+                true,
+                sw,
+            );
+            v
+        }
+        "battery" => {
+            let sw = 1.2;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            // Body outline.
+            pen(
+                &mut v,
+                &[
+                    [0.12, 0.22], [0.78, 0.22], [0.78, 0.78], [0.12, 0.78],
+                ],
+                true,
+                sw,
+            );
+            // Terminal nub on the right.
+            pen(
+                &mut v,
+                &[[0.78, 0.42], [0.90, 0.42], [0.90, 0.58], [0.78, 0.58]],
+                true,
+                sw,
+            );
+            v
+        }
+        "wifi" => {
+            let sw = 1.2;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            // Three arcs + dot. Approximated as strokes.
+            circle(&mut v, 0.5, 0.82, 0.06, sw);
+            // arc 1 (small)
+            pen(&mut v, &[[0.32, 0.62], [0.5, 0.48], [0.68, 0.62]], false, sw);
+            // arc 2
+            pen(&mut v, &[[0.20, 0.48], [0.5, 0.26], [0.80, 0.48]], false, sw);
+            // arc 3
+            pen(&mut v, &[[0.10, 0.34], [0.5, 0.10], [0.90, 0.34]], false, sw);
+            v
+        }
+        "bluetooth" => {
+            let sw = 1.2;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            pen(&mut v, &[[0.42, 0.12], [0.62, 0.32], [0.42, 0.52], [0.62, 0.72], [0.42, 0.90]], false, sw);
+            pen(&mut v, &[[0.42, 0.12], [0.42, 0.90]], false, sw);
+            v
+        }
+        "sun" => {
+            let sw = 1.2;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            circle(&mut v, 0.5, 0.5, 0.16, sw);
+            // 8 rays
+            for i in 0..8 {
+                let a = (i as f32) * std::f32::consts::TAU / 8.0;
+                let (x0, y0) = (0.5 + 0.26 * a.cos(), 0.5 + 0.26 * a.sin());
+                let (x1, y1) = (0.5 + 0.38 * a.cos(), 0.5 + 0.38 * a.sin());
+                pen(&mut v, &[[x0, y0], [x1, y1]], false, sw);
+            }
+            v
+        }
+        "chevron-right" => {
+            let sw = 1.5;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            pen(&mut v, &[[0.35, 0.18], [0.68, 0.5], [0.35, 0.82]], false, sw);
+            v
+        }
+        "chevron-left" => {
+            let sw = 1.5;
+            let mut v: Vec<GlyphShape> = Vec::new();
+            pen(&mut v, &[[0.65, 0.18], [0.32, 0.5], [0.65, 0.82]], false, sw);
+            v
+        }
+        _ => return None,
         };
     Some(tris)
 }

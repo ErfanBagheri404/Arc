@@ -47,8 +47,19 @@ pub struct AudioState {
     pub peak: Option<f32>,
 }
 
+/// A write the app thread hands to the worker: the COM endpoint pointers live
+/// on the worker's MTA apartment, so a setter only stores the request and the
+/// next tick applies it (~250 ms, inside the plan's latency budget and free).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cmd {
+    /// Master volume 0..=100.
+    Volume(u8),
+    Mute(bool),
+}
+
 pub struct Audio {
     shared: Arc<Mutex<AudioState>>,
+    cmd: Arc<Mutex<Option<Cmd>>>,
 }
 
 impl Audio {
@@ -57,11 +68,31 @@ impl Audio {
     pub fn start() -> Self {
         let shared = Arc::new(Mutex::new(AudioState::default()));
         let worker = shared.clone();
+        let cmd = Arc::new(Mutex::new(None as Option<Cmd>));
         std::thread::Builder::new()
             .name("arc-audio".into())
-            .spawn(move || run(worker))
+            .spawn({
+                let cmd = cmd.clone();
+                move || run(worker, cmd)
+            })
             .ok();
-        Self { shared }
+        Self { shared, cmd }
+    }
+
+    /// Set master volume 0..=100; applied on the worker's next tick.
+    pub fn set_volume(&self, pct: u8) {
+        self.write(Cmd::Volume(pct.min(100)));
+    }
+
+    /// Mute or unmute the default output; applied on the worker's next tick.
+    pub fn set_mute(&self, mute: bool) {
+        self.write(Cmd::Mute(mute));
+    }
+
+    fn write(&self, cmd: Cmd) {
+        if let Ok(mut slot) = self.cmd.lock() {
+            *slot = Some(cmd);
+        }
     }
 
     /// Current reading. Cheap: a mutex read.
@@ -70,7 +101,7 @@ impl Audio {
     }
 }
 
-fn run(shared: Arc<Mutex<AudioState>>) {
+fn run(shared: Arc<Mutex<AudioState>>, cmd: Arc<Mutex<Option<Cmd>>>) {
         crate::app::dbg_spawn_log("audio.rs");
     let mut out_meter: Option<IAudioMeterInformation> = None;
     // SAFETY: MTA apartment for this thread alone; the media service uses the
@@ -96,6 +127,22 @@ fn run(shared: Arc<Mutex<AudioState>>) {
 
         let mut state = AudioState::default();
         state.mic_active = mic_active_until.is_some_and(|t| now < t);
+
+        // Apply one pending write, if any, against the endpoint we hold.
+        let pending = cmd.lock().ok().and_then(|slot| *slot);
+        if let Some(c) = pending {
+            if let Some((_, v)) = volume.as_ref() {
+                // SAFETY: setters on a live endpoint, same object as reads.
+                match c {
+                    Cmd::Volume(p) => unsafe {
+                        let _ = v.SetMasterVolumeLevelScalar(p as f32 / 100.0, std::ptr::null());
+                    },
+                    Cmd::Mute(m) => unsafe {
+                        let _ = v.SetMute(m, std::ptr::null());
+                    },
+                }
+            }
+        }
 
         // Output: volume + mute. `Activate` re-resolves nothing, so a dead
         // device (unplugged headphones) fails the get and forces a re-acquire.

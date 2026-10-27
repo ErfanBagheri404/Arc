@@ -23,7 +23,8 @@ use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVo
 /// we do not otherwise need, and the value is ABI-stable.
 const DRIVE_REMOVABLE: u32 = 2;
 use windows::Win32::Devices::Display::{
-    GetMonitorBrightness, GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR,
+    GetMonitorBrightness, GetPhysicalMonitorsFromHMONITOR, SetMonitorBrightness,
+    PHYSICAL_MONITOR,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, POINT};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
@@ -69,6 +70,38 @@ pub fn brightness() -> Option<u8> {
         }
         let pct = (cur - min) as f32 / (max - min) as f32 * 100.0;
         Some(pct.round().clamp(0.0, 100.0) as u8)
+    }
+}
+
+/// Write the primary monitor's brightness as 0..=100 over DDC/CI. Same
+/// shape as [`brightness`] — one physical monitor, failing cleanly on
+/// displays that do not speak DDC/CI. The caller keeps its own mirror, so a
+/// failed write simply means the next read shows the unchanged truth.
+pub fn set_brightness(pct: u8) -> bool {
+    let target = pct.min(100);
+    // SAFETY: handle + out-params, all reads follow success, handle closed.
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut monitors = [PHYSICAL_MONITOR {
+            hPhysicalMonitor: HANDLE::default(),
+            szPhysicalMonitorDescription: [0; 128],
+        }];
+        if GetPhysicalMonitorsFromHMONITOR(hmon, &mut monitors).is_err() {
+            return false;
+        }
+        let mut min = 0u32;
+        let mut cur = 0u32;
+        let mut max = 100u32;
+        let got =
+            GetMonitorBrightness(monitors[0].hPhysicalMonitor, &mut min, &mut cur, &mut max) != 0;
+        let ok = if got && max > min {
+            let value = min as f32 + (max - min) as f32 * target as f32 / 100.0;
+            SetMonitorBrightness(monitors[0].hPhysicalMonitor, value.round() as u32) != 0
+        } else {
+            false
+        };
+        let _ = CloseHandle(monitors[0].hPhysicalMonitor);
+        ok
     }
 }
 

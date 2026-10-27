@@ -24,6 +24,7 @@ use crate::ui::layout::{island_radius, openness};
 
 pub mod calendar;
 pub mod clipboard;
+pub mod control;
 pub mod layout;
 pub mod media;
 pub mod picker;
@@ -42,12 +43,13 @@ pub const APP_TITLE: &str = "Arc";
 
 /// Visible tab labels, in layout order.
 ///
-/// Eight, not nine: the Settings tab is gone (Settings live in their own
-/// top-level window, tray → Settings…), and Timer + Calendar are merged into
-/// one tab that splits its body in two — so the strip never spends width on a
-/// tab the user does not browse, and the two time widgets get side-by-side
-/// columns instead of two stops in the dock.
-pub const TABS: [&str; 8] = [
+/// Nine: the Settings tab is gone (Settings live in their own top-level
+/// window, tray → Settings…), Timer + Calendar are merged into one tab that
+/// splits its body in two — so the strip never spends width on a tab the user
+/// does not browse, and the two time widgets get side-by-side columns instead
+/// of two stops in the dock. `Control` is the quick-settings panel
+/// (Connectivity / Display / Sound).
+pub const TABS: [&str; 9] = [
     "Media",
     "Stats",
     "Time",
@@ -56,6 +58,7 @@ pub const TABS: [&str; 8] = [
     "Usage",
     "Shelf",
     "Terminal",
+    "Control",
 ];
 
 /// Placeholder content rows. Structure only — no data behind them yet.
@@ -95,7 +98,7 @@ pub const TAB_ICON: f32 = 17.0;
 pub const TAB_ICON_GAP: f32 = 5.0;
 
 /// One icon name per entry in [`TABS`], in the same order.
-pub const TAB_GLYPHS: [&str; 8] = [
+pub const TAB_GLYPHS: [&str; 9] = [
     "note",      // Media
     "chart",     // Stats
     "hourglass", // Time (timer + calendar)
@@ -104,6 +107,7 @@ pub const TAB_GLYPHS: [&str; 8] = [
     "bolt",      // Usage
     "tray",      // Shelf
     "terminal",  // Terminal
+    "settings",  // Control
 ];
 /// Height of one content row.
 pub const ROW_H: f32 = 24.0;
@@ -226,6 +230,9 @@ pub struct ViewState {
     pub hover_tab: Option<usize>,
     /// Content row under the cursor, if any.
     pub hover_row: Option<usize>,
+    /// Control-tab control under the cursor, if any. Recomputed from the same
+    /// rects the tab draws, so a hover can never light a different control.
+    pub hover_ctl: Option<ControlHit>,
     /// What the Media tab draws. The app thread refreshes it from
     /// `services::media` each frame; `build` stays pure.
     pub media: crate::services::media::MediaState,
@@ -250,6 +257,18 @@ pub struct ViewState {
     /// Latest weather, or `None` until the first fetch lands. A standing pill
     /// row, not a HUD: it does not expire.
     pub weather: Option<crate::services::weather::Snapshot>,
+    /// Battery/AC state for the header's status strip (temp left, battery right).
+    /// `None` on machines with no battery.
+    pub power: Option<crate::app::hud::Power>,
+    /// Wall-clock label for the header's status strip, `h:mm AM/PM`.
+    pub clock: String,
+    /// The Wi-Fi network the capture endpoint reports, else offline.
+    pub ssid: Option<String>,
+    /// Master output volume 0..=100, and whether output is muted.
+    pub volume_pct: u8,
+    pub muted: bool,
+    /// Monitor brightness 0..=100, when the display reports it.
+    pub bright_pct: Option<u8>,
     /// Upcoming calendar events, soonest first.
 
     /// Downloads folder size-delta, from the beta watcher.
@@ -396,6 +415,9 @@ impl ViewState {
             self.prev_tab = self.active_tab;
             self.active_tab = tab;
             self.tab_swap.swap_to();
+            // A control hover belongs to the tab that drew it; the next
+            // `CursorMoved` re-derives it against the new tab's rects.
+            self.hover_ctl = None;
         }
     }
 
@@ -547,13 +569,28 @@ impl ViewState {
         picker::swatch_hit(self.island_width, top, self.picker.trail_len(), x, y).map(|i| i + 1)
     }
 
+    /// Which Control-tab control panel-space `(x, y)` hits, if any.
+    ///
+    /// Pills win over sliders: they are drawn above the tracks and their rects
+    /// do not overlap, so the order only matters for a rounded-corner graze.
+    pub fn control_hit(&self, x: f32, y: f32) -> Option<ControlHit> {
+        if self.active_tab != CONTROL_TAB || !self.content_visible() {
+            return None;
+        }
+        let top = row_band_top();
+        if let Some(i) = control::pill_at(self.island_width, top, x, y) {
+            return Some(ControlHit::Pill(i));
+        }
+        control::slider_at(self.island_width, top, x, y).map(|(i, f)| ControlHit::Slider(i, f))
+    }
+
     /// Which timer preset button panel-space `(x, y)` hits, if any.
     pub fn timer_preset(&self, x: f32, y: f32) -> Option<usize> {
         if self.active_tab != TIMER_TAB || !self.content_visible() {
             return None;
         }
         let top = row_band_top();
-        timer::buttons(self.island_width, top)
+        timer::buttons(time_frame(self.island_width), top)
             .into_iter()
             .position(|r| x >= r.x && x <= r.max_x() && y >= r.y && y <= r.max_y())
     }
@@ -1036,7 +1073,7 @@ pub fn stagger_progress(rise: f32, index: usize) -> f32 {
 /// the body is what stops the `Arc` title and the dock from sliding with a tab
 /// swap — only the body cross-fades, the chrome stays put.
 fn panel_chrome(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
-    let mut out = header_block(fw, fh);
+    let mut out = header_block(fw, fh, state);
     out.extend(corner_icons(fw, fh, state));
     out.extend(tab_strip(fw, fh, state));
     out
@@ -1087,6 +1124,8 @@ fn panel_body(fw: f32, fh: f32, state: &ViewState, tab: usize) -> Vec<Node> {
             state.terminal.as_ref(),
             state.terminal_error.as_deref(),
         )
+    } else if tab == CONTROL_TAB {
+        control::content(fw, fh, tab_bottom, state)
     } else {
         content_rows(fw, fh, tab_bottom, state)
     }
@@ -1106,6 +1145,8 @@ pub const SHELF_TAB: usize = 6;
 pub const USAGE_TAB: usize = 5;
 /// The Terminal tab — the ConPTY grid.
 pub const TERMINAL_TAB: usize = 7;
+/// The Control tab — quick settings: connectivity, display, sound.
+pub const CONTROL_TAB: usize = 8;
 
 /// The Time tab's column width: the panel's content width minus one gutter,
 /// split in two.
@@ -1137,23 +1178,84 @@ fn header_height() -> f32 {
 /// `measure(APP_TITLE)` clipped the title to `A…`: `measure` is an approximation
 /// and DirectWrite's real advance is a hair wider, so an exactly-sized box
 /// ellipsizes its own text. Same trap as the remaining-time label.
-fn header_block(fw: f32, fh: f32) -> Vec<Node> {
+fn header_block(fw: f32, fh: f32, state: &ViewState) -> Vec<Node> {
+    let mut out = Vec::new();
     let mut style = TextStyle::title();
     style.align = Align::Start;
-    vec![Node::Text {
-        rect: put(
-            fw,
-            fh,
-            Rect::new(
-                PANEL_PAD,
-                HEADER_Y,
-                measure(APP_TITLE, &style) + HEADER_SLACK,
-                line_height(&style),
-            ),
-        ),
-        text: APP_TITLE.to_string(),
-        style,
-    }]
+    let lh = line_height(&style);
+    let y = HEADER_Y + (header_height() - lh) * 0.5;
+
+    // Left: cloud glyph + temperature.
+    if let Some(w) = &state.weather {
+        let icon = 13.0;
+        let temp = format!("{:.0}°", w.now.temperature_2m);
+        let tw = measure(&temp, &style) + 4.0;
+        let x = PANEL_PAD;
+        out.push(Node::Glyph {
+            rect: put(fw, fh, Rect::new(x, y + (lh - icon) * 0.5, icon, icon)),
+            name: "cloud",
+            color: Rgba::rgba(0.91, 0.91, 0.91, 1.0),
+        });
+        out.push(Node::Text {
+            rect: put(fw, fh, Rect::new(x + icon + 5.0, y, tw, lh)),
+            text: temp,
+            style: style.clone(),
+        });
+    }
+
+    // Centre: the clock, tabular so it never jitters.
+    if !state.clock.is_empty() {
+        let mut cs = style.clone();
+        cs.tabular = true;
+        let cw = measure(&state.clock, &cs) + 8.0;
+        out.push(Node::Text {
+            rect: put(fw, fh, Rect::new((fw - cw) / 2.0, y, cw, lh)),
+            text: state.clock.clone(),
+            style: cs,
+        });
+    }
+
+    // Right: battery glyph + percent (+ a bolt while charging), then the
+    // corner controls. Hidden entirely on a battery-less box.
+    if let Some(p) = &state.power {
+        if let Some(pct) = p.percent {
+            let icon = 13.0;
+            let gap = 4.0;
+            let pct_text = format!("{pct}%");
+            let tw = measure(&pct_text, &style);
+            let color = if p.charging {
+                Rgba::rgba(0.30, 0.85, 0.45, 1.0)
+            } else if pct <= 20 {
+                Rgba::rgba(0.95, 0.72, 0.25, 1.0)
+            } else {
+                Rgba::rgba(0.91, 0.91, 0.91, 1.0)
+            };
+            // Right edge sits just left of the pin.
+            let right = corner_icons_x(fw).1 - 10.0;
+            let mut x = right - tw - gap - icon;
+            out.push(Node::Glyph {
+                rect: put(fw, fh, Rect::new(x, y + (lh - icon) * 0.5, icon, icon)),
+                name: "battery",
+                color,
+            });
+            x += icon + gap;
+            out.push(Node::Text {
+                rect: put(fw, fh, Rect::new(x, y, tw, lh)),
+                text: pct_text,
+                style: TextStyle { color, tabular: true, ..style.clone() },
+            });
+            x += tw;
+            if p.charging {
+                let bolt = 11.0;
+                out.push(Node::Glyph {
+                    rect: put(fw, fh, Rect::new(x + 3.0, y + (lh - bolt) * 0.5, bolt, bolt)),
+                    name: "bolt",
+                    color,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Breathing room past the measured title run so DirectWrite never trims it.
@@ -1164,6 +1266,14 @@ const HEADER_SLACK: f32 = 8.0;
 pub enum CornerIcon {
     Pin,
     Settings,
+}
+
+/// A Control-tab target: one of the four quick-setting pills, or one of the
+/// two sliders with the fraction of its track the cursor is at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ControlHit {
+    Pill(usize),
+    Slider(usize, f32),
 }
 
 /// The corner pair: pin, then settings, right-aligned on the header line.
@@ -1763,8 +1873,29 @@ mod tests {
         ViewState {
             island_width,
             island_height,
+            clock: "10:30".to_string(),
             ..Default::default()
         }
+    }
+
+    /// The glue test for the Control tab: `control_hit` is the one entry point
+    /// the click handler and the hover loop share, and it must answer on that
+    /// tab only — `pill_at`/`slider_at` geometry is covered in `control.rs`.
+    #[test]
+    fn control_hit_answers_only_on_the_control_tab() {
+        let mut view = view_sized(PANEL_W_REF, 640.0);
+        assert!(view.control_hit(0.0, 0.0).is_none());
+
+        view.active_tab = CONTROL_TAB;
+        // Nothing lives at the panel's top-left corner (pads start after it).
+        assert!(view.control_hit(0.0, 0.0).is_none());
+        // A pill center round-trips the same rect the tab draws.
+        let top = row_band_top();
+        let (x, y, w, h) = control::pills(view.island_width, top)[0];
+        assert_eq!(
+            view.control_hit(x + w * 0.5, y + h * 0.5),
+            Some(ControlHit::Pill(0))
+        );
     }
 
     /// Same slack the bounds invariant allows, shared with `layout::fit`.
@@ -1912,6 +2043,7 @@ mod tests {
             island_height: PANEL_H_REF,
             active_tab,
             hover_tab,
+            clock: "10:30".to_string(),
             ..Default::default()
         }
     }
@@ -2369,14 +2501,20 @@ mod tests {
     // ----------------------------------------------------------------- panel
 
     #[test]
-    fn panel_frame_contains_header_title_in_reference_style() {
+    fn panel_frame_contains_header_clock_in_reference_style() {
         let f = panel();
-        let (rect, style) = find_text(&f, APP_TITLE).expect("panel must contain the header title");
+        let (rect, style) = find_text(&f, "10:30").expect("panel must contain the header clock");
         assert_eq!(style.size, 12.0, "title is 12 px");
         assert_eq!(style.weight, Weight::Semibold, "title is semibold");
         assert_eq!(style.color, Rgba::WHITE, "title is white");
         assert!((rect.y - HEADER_Y).abs() < 1e-4, "header row sits at y=16");
-        assert!((rect.x - PANEL_PAD).abs() < 1e-4, "header is left-aligned");
+        // The clock owns the centre slot: within a pixel of the frame's middle.
+        let centre = (PANEL_W_REF - rect.w) / 2.0;
+        assert!(
+            (rect.x - centre).abs() < 1.0,
+            "clock must sit centred: x={} centre={centre}",
+            rect.x
+        );
     }
 
 #[test]
@@ -2496,9 +2634,12 @@ mod tests {
             let v = view_sized(w, h);
             let f = build(&v);
             let mut found: Vec<(&str, Rect)> = Vec::new();
+            // The header's pair only: the tab strip carries a `settings` glyph
+            // too (the Control tab), so the filter is the header's own row.
+            let header_line = HEADER_Y + header_height() + 1.0;
             for n in &f.scene.nodes {
                 if let Node::Glyph { name, rect, .. } = n {
-                    if *name == "pin" || *name == "settings" {
+                    if (*name == "pin" || *name == "settings") && rect.y < header_line {
                         found.push((name, *rect));
                     }
                 }
@@ -2717,7 +2858,7 @@ mod tests {
         let f1 = panel();
         assert!(f1.scene.count() > 2, "openness 1.0 has content");
         assert!(
-            find_text(&f1, APP_TITLE).is_some(),
+            find_text(&f1, "10:30").is_some(),
             "the title is fully present at openness 1.0"
         );
     }
@@ -2741,7 +2882,7 @@ mod tests {
                 f.scene.nodes
             );
             assert!(
-                find_text(&f, APP_TITLE).is_some(),
+                find_text(&f, "10:30").is_some(),
                 "the title must be present while peek_t decays ({peek_t})"
             );
         }
@@ -2805,7 +2946,7 @@ mod tests {
             f.scene.count() > 2,
             "content must be emitted at openness 0.35"
         );
-        let (_, style) = find_text(&f, APP_TITLE).expect("title");
+        let (_, style) = find_text(&f, "10:30").expect("clock");
         assert!(
             style.color.a > 0.0 && style.color.a < 1.0,
             "content must be partially faded in, got alpha {}",
@@ -2819,7 +2960,7 @@ mod tests {
         for i in 0..=200 {
             let open = i as f32 / 200.0;
             let f = build(&view_sized(width_at(open), height_at(open)));
-            let Some((_, style)) = find_text(&f, APP_TITLE) else {
+            let Some((_, style)) = find_text(&f, "10:30") else {
                 continue;
             };
             assert!(style.color.a >= prev, "content opacity dipped at {open}");
@@ -2985,20 +3126,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn header_box_leaves_room_past_the_measured_run() {
-        // Sizing this box to exactly `measure()` clipped the title to `A…`:
-        // the pure approximator under-reports DirectWrite's real advance by a
-        // fraction of a px, and the renderer trims whatever does not fit.
-        let mut style = TextStyle::title();
-        style.align = Align::Start;
-        let (rect, _) = find_text(&panel(), APP_TITLE).unwrap();
-        assert!(
-            rect.w >= measure(APP_TITLE, &style) + HEADER_SLACK - 1e-4,
-            "header box {} must clear the measured run by {HEADER_SLACK}",
-            rect.w
-        );
-    }
 
     #[test]
     fn the_spectrum_replaces_the_glyph_only_while_playing() {

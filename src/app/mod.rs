@@ -34,6 +34,7 @@ use hud::Hud;
 use std::path::PathBuf;
 use timer::{Timer, PRESETS};
 use windows::Win32::Foundation::POINT;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 /// Apply a Settings sheet click and persist it. Sheet clicks are how the user
@@ -222,12 +223,12 @@ const IDLE_POLL: Duration = Duration::from_millis(200);
 
 /// TEMP DEBUG: which site set redraw this iteration.
 static DBG_REASON: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-const DBG_REASONS: [&str; 31] = [
+const DBG_REASONS: [&str; 32] = [
     "none", "vis_toggle", "filedrop", "pill_toggle", "media_cmd", "timer_preset", "clip_hit",
     "cal_hit", "shelf_hit", "settings_hit", "tab_click", "cursor_moved", "cursor_left", "key",
     "resize", "media_snap", "stats_snap", "petframe", "hud_expire", "power", "drive", "picker",
     "clip_snap", "cal_snap", "usage_snap", "dl_snap", "mic", "volume", "timer_view",
-    "timer_zero", "timer_run",
+    "timer_zero", "timer_run", "ctl_hit",
 ];
 /// TEMP DEBUG: microseconds spent in the draw block of the last painted frame.
 static DBG_DRAW_US: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -476,9 +477,17 @@ pub fn run() -> std::process::ExitCode {
     let mut timer = Countdown::new(Instant::now());
 
     let mut state = IslandState::collapsed();
+    if std::env::var("ARC_FORCE_EXPANDED").is_ok() {
+        // Debug/verification path: launch already expanded so the panel can be
+        // captured without synthesising input the overlay can't see.
+        state.open_for_playback();
+    }
     // The tab selection and hover persist across frames; everything else the UI
     // needs is derived from the size springs.
     let mut view = ui::ViewState::default();
+    // Control centre is the expanded notch's home: that is the panel a fresh
+    // expansion lands on, not last session's tab.
+    view.active_tab = ui::CONTROL_TAB;
     let mut settings_win: Option<SettingsWindow> = None;
     let mut settings_dirty = false;
     // The idle-notch pet: settings decide whether it shows and which petdex
@@ -739,6 +748,42 @@ pub fn run() -> std::process::ExitCode {
                         }
                         dbg_reason(8);
                         redraw = true;
+                    } else if let Some(hit) = view.control_hit(lx, ly) {
+                        // Quick settings: the radios hand off to the OS's own
+                        // settings pages (WinRT `Radio` would be a second API
+                        // for one switch), the pin and mute act here, and the
+                        // two sliders write through their services — the app
+                        // thread only mirrors the value it just asked for, and
+                        // the next poll corrects it if the write failed.
+                        match hit {
+                            ui::ControlHit::Pill(0) => {
+                                crate::services::shelf::open_uri("ms-settings:network-wifi");
+                            }
+                            ui::ControlHit::Pill(1) => {
+                                crate::services::shelf::open_uri("ms-settings:bluetooth");
+                            }
+                            ui::ControlHit::Pill(2) => state.toggle_visibility(),
+                            ui::ControlHit::Pill(3) => {
+                                let next = !view.muted;
+                                audio.set_mute(next);
+                                view.muted = next;
+                            }
+                            ui::ControlHit::Pill(_) => {}
+                            ui::ControlHit::Slider(0, frac) => {
+                                let v = (frac * 100.0).round().clamp(0.0, 100.0) as u8;
+                                audio.set_volume(v);
+                                view.volume_pct = v;
+                            }
+                            ui::ControlHit::Slider(1, frac) => {
+                                let v = (frac * 100.0).round().clamp(0.0, 100.0) as u8;
+                                if crate::services::status::set_brightness(v) {
+                                    view.bright_pct = Some(v);
+                                }
+                            }
+                            ui::ControlHit::Slider(_, _) => {}
+                        }
+                        dbg_reason(31);
+                        redraw = true;
                     }
                 }
                 Event::CursorMoved { x, y } => {
@@ -749,9 +794,11 @@ pub fn run() -> std::process::ExitCode {
                     let ly = y / scale - state.body_offset_y();
                     let tab = view.tab_at(lx, ly);
                     let row = view.row_at(lx, ly);
-                    if tab != view.hover_tab || row != view.hover_row {
+                    let ctl = view.control_hit(lx, ly);
+                    if tab != view.hover_tab || row != view.hover_row || ctl != view.hover_ctl {
                         view.hover_tab = tab;
                         view.hover_row = row;
+                        view.hover_ctl = ctl;
                         dbg_reason(11);
                     }
                     // The pointer moving is itself the reason to re-evaluate the
@@ -759,7 +806,10 @@ pub fn run() -> std::process::ExitCode {
                     redraw = true;
                 }
                 Event::CursorLeft => {
-                    if view.hover_tab.take().is_some() | view.hover_row.take().is_some() {
+                    if view.hover_tab.take().is_some()
+                        | view.hover_row.take().is_some()
+                        | view.hover_ctl.take().is_some()
+                    {
                         dbg_reason(12);
                         redraw = true;
                     }
@@ -919,11 +969,16 @@ pub fn run() -> std::process::ExitCode {
                     dbg_reason(19);
                     redraw = true;
                 }
+                view.power = Some(p);
+                redraw = true;
             }
         }
         if settled && now.duration_since(last_net) >= NET_POLL {
             last_net = now;
-            let mut armed = net_hud(&net::sample(), &mut last_net_state, now, &mut hud);
+            let net_state = net::sample();
+            let mut armed = net_hud(&net_state, &mut last_net_state, now, &mut hud);
+            // The SSID is not just a HUD: the Control tab shows it standing.
+            view.ssid = net_state.ssid.clone();
             // Focus: transition-only, same rule as the other HUDs.
             let focus = status::focus_on();
             if last_focus.replace(focus) == Some(!focus) {
@@ -933,7 +988,9 @@ pub fn run() -> std::process::ExitCode {
             // Brightness: DDC/CI read; arm on a real change (hotkey, slider).
             // Debounced by 2 %: the panel's own ramp crosses many values per
             // key-hold, and the HUD's re-arm timer already handles a stream.
-            if let Some(b) = status::brightness() {
+            let bright = status::brightness();
+            view.bright_pct = bright;
+            if let Some(b) = bright {
                 let jumped = match last_brightness.replace(b) {
                     Some(prev) => prev.abs_diff(b) >= 2,
                     None => false,
@@ -1027,6 +1084,27 @@ pub fn run() -> std::process::ExitCode {
             view.mic_active = a.mic_active;
             dbg_reason(26);
             redraw = true;
+        }
+        // Wall clock for the header status strip: one GetLocalTime per tick,
+        // redraw only when the displayed minute rolls over.
+        let st = unsafe { GetLocalTime() };
+        let clock = format!("{:02}:{:02}", st.wHour, st.wMinute);
+        if clock != view.clock {
+            view.clock = clock;
+            redraw = true;
+        }
+        if let Some(v) = a.volume {
+            if v != view.volume_pct {
+                view.volume_pct = v;
+                redraw = true;
+            }
+        }
+        match a.muted {
+            Some(m) if m != view.muted => {
+                view.muted = m;
+                redraw = true;
+            }
+            _ => {}
         }
         if volume_hud(&a, &mut last_audio_state, now, &mut hud) {
             view.hud = hud.current();
